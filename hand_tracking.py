@@ -24,7 +24,7 @@ class HandSmoother:
         smooth_z = self.prev_z * (1 - self.alpha) + z * self.alpha
         
         self.prev_x, self.prev_y, self.prev_z = smooth_x, smooth_y, smooth_z
-        return int(smooth_x), int(smooth_y), smooth_z
+        return smooth_x, smooth_y, smooth_z
 
     def reset(self):
         self.prev_x = None
@@ -73,14 +73,19 @@ class HandTracker:
     def _draw_custom_hand(self, img, hand_lms):
         h, w, c = img.shape
         
-        # Define connections we care about
+        # Define connections we care about (All fingers)
         # Thumb: 0->1->2->3->4
         # Index: 0->5->6->7->8
-        # We can also just draw the connections.
+        # Middle: 0->9->10->11->12
+        # Ring: 0->13->14->15->16
+        # Pinky: 0->17->18->19->20
         
         connections = [
-            (1, 0), (2, 1), (3, 2), (4, 3), # Thumb
-            (5, 0), (6, 5), (7, 6), (8, 7)  # Index
+            (1, 0), (2, 1), (3, 2), (4, 3),   # Thumb
+            (5, 0), (6, 5), (7, 6), (8, 7),   # Index
+            (9, 0), (10, 9), (11, 10), (12, 11), # Middle
+            (13, 0), (14, 13), (15, 14), (16, 15), # Ring
+            (17, 0), (18, 17), (19, 18), (20, 19)  # Pinky
         ]
         
         # Get all landmarks in pixel coords
@@ -89,17 +94,10 @@ class HandTracker:
             cx, cy = int(lm.x * w), int(lm.y * h)
             lms_px.append((cx, cy))
             
-        # Draw lines and points
+        # Draw lines only (Skeleton)
         for start_idx, end_idx in connections:
             if start_idx < len(lms_px) and end_idx < len(lms_px):
                 cv2.line(img, lms_px[start_idx], lms_px[end_idx], (255, 255, 255), 3)
-                
-        # Draw tips specifically
-        cv2.circle(img, lms_px[4], 7, (255, 0, 255), cv2.FILLED) # Thumb tip
-        cv2.circle(img, lms_px[8], 7, (0, 255, 255), cv2.FILLED) # Index tip
-        
-        # Draw Wrist
-        cv2.circle(img, lms_px[0], 5, (200, 200, 200), cv2.FILLED) # Wrist
 
     def find_position(self, img, hand_no=0, draw=False): # draw here is for legacy circle drawing
         lm_list = []
@@ -160,7 +158,36 @@ class HandTracker:
         # But scaling the 2D projected distance by our depth-aware scale factor is exactly what we want!
         
         dist_cm = dist_px * cm_per_pixel
+        dist_cm = dist_px * cm_per_pixel
         return dist_cm
+
+    def get_estimated_z(self, lm_list):
+        """
+        Estimate Z depth based on hand size (Wrist to Middle MCP).
+        Returns a Z value where 0 is 'standard' distance, positive is closer, negative is farther.
+        """
+        if len(lm_list) < 21:
+            return 0.0
+        
+        # Wrist (0) to Middle MCP (9)
+        x0, y0 = lm_list[0][1], lm_list[0][2]
+        x9, y9 = lm_list[9][1], lm_list[9][2]
+        
+        # Calculate size in pixels
+        current_size = math.hypot(x9 - x0, y9 - y0)
+        
+        # Standard size calibration (adjust as needed)
+        # Assuming ~100-150 pixels is a comfortable distance
+        STD_SIZE = 120.0
+        
+        # Simple linear mapping for Z relative to camera
+        # If hand is double size (240), it's much closer.
+        # We scale this to be suitable for our 3D canvas coordinates.
+        # Let's return a value roughly between -2 and 2.
+        
+        z = (current_size - STD_SIZE) / 50.0  # value varies roughly -2 to +2
+        return z
+
 
     def is_drawing_gesture(self, lm_list, threshold_cm=3.0, debug=False):
         """
@@ -222,16 +249,33 @@ class HandTracker:
         """
         Check if two hands are visible and all fingers are spread open.
         Returns:
-            is_spread (bool): True if both hands are spread
+            is_spread (bool): True if both hands are spread and NOT near border
         """
         if self.results and self.results.multi_hand_landmarks:
             if len(self.results.multi_hand_landmarks) == 2:
                 # Check BOTH hands
-                hand1_open = self._is_hand_open(self.results.multi_hand_landmarks[0])
-                hand2_open = self._is_hand_open(self.results.multi_hand_landmarks[1])
+                hand1 = self.results.multi_hand_landmarks[0]
+                hand2 = self.results.multi_hand_landmarks[1]
+
+                # Check if near border
+                if self._is_near_border(hand1) or self._is_near_border(hand2):
+                    return False
+
+                hand1_open = self._is_hand_open(hand1)
+                hand2_open = self._is_hand_open(hand2)
                 
                 if hand1_open and hand2_open:
                     return True
+        return False
+
+    def _is_near_border(self, hand_landmarks, margin=0.05):
+        """
+        Check if any landmark of the hand is within the margin of the image border.
+        margin: percentage of width/height (0.05 = 5%)
+        """
+        for lm in hand_landmarks.landmark:
+            if lm.x < margin or lm.x > (1 - margin) or lm.y < margin or lm.y > (1 - margin):
+                return True
         return False
 
     def _is_hand_open(self, hand_landmarks):
@@ -280,3 +324,54 @@ class HandTracker:
              return False
              
         return True
+
+    def is_fist_gesture(self, lm_list, debug=False):
+        """
+        Check if the hand is in a fist (all fingers curled).
+        """
+        if len(lm_list) < 21:
+             return False
+
+        # Check if 4 fingers (Index, Middle, Ring, Pinky) are curled
+        
+        finger_tips = [8, 12, 16, 20]
+        finger_pips = [6, 10, 14, 18] # PIP is knuckle
+        
+        # Wrist is lm_list[0]
+        wx, wy = lm_list[0][1], lm_list[0][2]
+        
+        fingers_curled = 0
+        for tip_id, pip_id in zip(finger_tips, finger_pips):
+            tx, ty = lm_list[tip_id][1], lm_list[tip_id][2]
+            px, py = lm_list[pip_id][1], lm_list[pip_id][2]
+            
+            dist_tip = (tx - wx)**2 + (ty - wy)**2
+            dist_pip = (px - wx)**2 + (py - wy)**2
+            
+            # If Tip is CLOSER to Wrist than PIP is, it's curled
+            if dist_tip < dist_pip:
+                fingers_curled += 1
+                
+        # Thumb check: 
+        # To avoid "Thumbs Up" triggering rotation, we require the thumb to be curled/wrapped.
+        # Robust Check: Compare Thumb Tip (4) distance to Pinky MCP (17) vs Thumb IP (3) distance to Pinky MCP (17).
+        # In a fist (thumb wrapped or tucked), the Tip is closer to the Pinky base than the IP joint is.
+        # In an open hand or thumbs up, the Tip is further away.
+        
+        thumb_tip = lm_list[4]
+        thumb_ip = lm_list[3]
+        pinky_mcp = lm_list[17]
+        
+        tx, ty = thumb_tip[1], thumb_tip[2]
+        ipx, ipy = thumb_ip[1], thumb_ip[2]
+        px, py = pinky_mcp[1], pinky_mcp[2]
+        
+        dist_tip_pinky = (tx - px)**2 + (ty - py)**2
+        dist_ip_pinky = (ipx - px)**2 + (ipy - py)**2
+        
+        thumb_curled = dist_tip_pinky < dist_ip_pinky
+        
+        if debug:
+            print(f"Fingers Curled: {fingers_curled}, Thumb Curled: {thumb_curled}")
+            
+        return fingers_curled >= 4 and thumb_curled
