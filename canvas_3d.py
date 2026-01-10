@@ -14,6 +14,11 @@ class Canvas3D:
         self.current_stroke = []
         self.cursor_pos = None # (x, y, z) tuple for 3D cursor
         
+        # Tool State
+        self.selected_indices = [] # Indices of selected strokes in self.lines
+        self.undo_stack = []
+        self.redo_stack = []
+        
         # Rotation State
         self.rot_x = 0.0 # Pitch
         self.rot_y = 0.0 # Yaw
@@ -54,6 +59,26 @@ class Canvas3D:
         glLightf(GL_LIGHT1, GL_LINEAR_ATTENUATION, 0.2)
         glLightf(GL_LIGHT1, GL_QUADRATIC_ATTENUATION, 0.02)
 
+    def save_state(self):
+        # Deep copy of lines for undo
+        import copy
+        self.undo_stack.append(copy.deepcopy(self.lines))
+        # Limit stack size
+        if len(self.undo_stack) > 20:
+             self.undo_stack.pop(0)
+        self.redo_stack.clear()
+
+    def undo(self):
+        if self.undo_stack:
+            self.redo_stack.append(self.lines)
+            self.lines = self.undo_stack.pop()
+            self.selected_indices = [] # Clear selection on undo
+
+    def redo(self):
+        if self.redo_stack:
+            self.undo_stack.append(self.lines)
+            self.lines = self.redo_stack.pop()
+            self.selected_indices = []
 
     def get_world_point(self, x, y, z):
         """
@@ -104,9 +129,10 @@ class Canvas3D:
 
         if start_new_stroke:
             if self.current_stroke:
+                self.save_state() # Save before adding new stroke
                 self.lines.append(self.current_stroke)
                 self.current_stroke = []
-        
+                
         # Spatial Filtering: Don't add if too close to last point
         MIN_DIST = 0.02 # Tune this for smoothness vs detail
         if self.current_stroke:
@@ -124,6 +150,7 @@ class Canvas3D:
         Useful for when the user stops drawing.
         """
         if self.current_stroke:
+            self.save_state() # Save before committing
             self.lines.append(self.current_stroke)
             self.current_stroke = []
 
@@ -137,11 +164,10 @@ class Canvas3D:
 
 
     def clear(self):
+        self.save_state()
         self.lines = []
         self.current_stroke = []
-        # Optional: Reset rotation on clear?
-        # self.rot_x = 0
-        # self.rot_y = 0
+        self.selected_indices = []
 
     def rotate(self, d_yaw, d_pitch):
         """
@@ -151,6 +177,146 @@ class Canvas3D:
         """
         self.rot_y += d_yaw
         self.rot_x += d_pitch
+
+    def rotate_selection(self, d_yaw, d_pitch):
+        """
+        Rotate only the selected lines.
+        This is a geometry transformation on the points themselves.
+        """
+        if not self.selected_indices:
+             return
+        
+        # We need to rotate the points of the selected strokes around the centroid of the selection?
+        # Or just around the world origin? Rotation usually around origin or local origin.
+        # User asked: "Or if you just do the rotate/pan while selected, it moves around/rotates the selected shape"
+        # Let's rotate around the Centroid of the selection for intuitive manipulation.
+        
+        # 1. Calc Centroid
+        all_points = []
+        for idx in self.selected_indices:
+             all_points.extend(self.lines[idx])
+        
+        if not all_points: return
+        
+        centroid = np.mean(all_points, axis=0)
+        
+        # 2. Rotate points
+        rad_x = np.radians(d_pitch)
+        rad_y = np.radians(d_yaw)
+        
+        # Prepare rotation matrices
+        rx_mat = np.array([
+            [1, 0, 0],
+            [0, np.cos(rad_x), -np.sin(rad_x)],
+            [0, np.sin(rad_x), np.cos(rad_x)]
+        ])
+        
+        ry_mat = np.array([
+            [np.cos(rad_y), 0, np.sin(rad_y)],
+            [0, 1, 0],
+            [-np.sin(rad_y), 0, np.cos(rad_y)]
+        ])
+        
+        # Combined Rotation R = Ry * Rx (Order matters, let's just do one by one)
+        
+        # Ideally we want to rotate around Camera Right and Camera Up vectors if we want view-relative rotation...
+        # But `d_yaw` and `d_pitch` from fist are just delta X and delta Y movements mapped to rotation angles.
+        
+        # Let's just rotate around world axes for now.
+        
+        new_lines = []
+        import copy
+        # We should modify self.lines directly? 
+        # But we need to save state first if this is a discrete action?
+        # Continuous rotation should probably not save state every frame.
+        # Save state on Interaction Start (in main.py) would be better.
+        
+        for idx in self.selected_indices:
+            stroke = self.lines[idx]
+            new_stroke = []
+            for p in stroke:
+                v = np.array(p) - centroid
+                # Rotate Y
+                v = np.dot(ry_mat, v)
+                # Rotate X
+                v = np.dot(rx_mat, v)
+                new_p = v + centroid
+                new_stroke.append(tuple(new_p))
+            self.lines[idx] = new_stroke
+
+    def move_selection(self, dx, dy):
+        """
+        Move selected lines in screen plane (approximate).
+        We map dx, dy (interface coords roughly?) or world?
+        Let's assume dx, dy are World Space deltas for simplicity first, 
+        or we need to map View Space delta to World Space delta.
+        """
+        # Simplest: Just add to X and Y (since we are drawing in 3D but logic is View-based).
+        # Actually our gestures give us 'dx' 'dy' in pixel-like or arbitrary units.
+        # We need to scale them to world units.
+        
+        scale = 0.01
+        move_vec = np.array([dx * scale, -dy * scale, 0]) # Flip Y for world
+        
+        # We should rotate this move_vec by the inverse of the Camera Rotation
+        # so that "Right" means "Right on Screen".
+        rad_x = np.radians(-self.rot_x)
+        rad_y = np.radians(-self.rot_y)
+        
+        rx_mat = np.array([
+            [1, 0, 0],
+            [0, np.cos(rad_x), -np.sin(rad_x)],
+            [0, np.sin(rad_x), np.cos(rad_x)]
+        ])
+        ry_mat = np.array([
+            [np.cos(rad_y), 0, np.sin(rad_y)],
+            [0, 1, 0],
+            [-np.sin(rad_y), 0, np.cos(rad_y)]
+        ])
+        
+        # vec_world = InvRotY * InvRotX * vec_view
+        move_vec = np.dot(rx_mat, move_vec)
+        move_vec = np.dot(ry_mat, move_vec)
+        
+        for idx in self.selected_indices:
+            stroke = self.lines[idx]
+            new_stroke = []
+            for p in stroke:
+                new_p = np.array(p) + move_vec
+                new_stroke.append(tuple(new_p))
+            self.lines[idx] = new_stroke
+
+    def select_at(self, screen_x, screen_y, radius=30):
+        """
+        Finds the stroke closest to the screen coordinates.
+        Toggles selection if found.
+        """
+        # First, deselect all if clicked on empty space?
+        # Or add to selection?
+        # Let's simple toggle: Click -> Select. Click Empty -> Deselect All.
+        
+        cursor_pos = np.array([screen_x, screen_y])
+        best_dist = radius
+        best_idx = -1
+        
+        for i, stroke in enumerate(self.lines):
+            # Check stroke points
+            for p3d in stroke:
+                p2d = self.project_point(p3d)
+                if p2d:
+                    dist = np.linalg.norm(np.array(p2d) - cursor_pos)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_idx = i
+        
+        if best_idx != -1:
+            if best_idx in self.selected_indices:
+                self.selected_indices.remove(best_idx)
+            else:
+                self.selected_indices = [best_idx] # Single selection for now? Or additive? 
+                # User asked for "Select logic". Let's do Single Select + Click Empty to Clear.
+        else:
+            self.selected_indices = []
 
     def zoom(self, d_z):
         """
@@ -270,6 +436,8 @@ class Canvas3D:
         Erase strokes that overlap with the 2D screen circle defined by screen_x, screen_y, radius.
         radius is in screen pixels.
         """
+        self.save_state() # Save state before erasing
+        
         eraser_pos = np.array([screen_x, screen_y])
         new_lines = []
         
@@ -278,87 +446,91 @@ class Canvas3D:
              self.lines.append(self.current_stroke)
              self.current_stroke = []
 
-        for stroke in self.lines:
+        for i, stroke in enumerate(self.lines):
+            # If selected, maybe don't erase? Or erase freely. Erase free is standard.
+            
             new_stroke = []
-            stroke_points_screen = []
-            
-            # Pre-calculate screen points for this stroke to avoid re-projecting repeatedly?
-            # Or just do it on the fly. Doing it on the fly is simpler to implement logic.
-            
-            # We iterate point by point.
-            # Ideally we check segments.
-            
-            if len(stroke) < 2:
-                # Single point stroke
-                p_screen = self.project_point(stroke[0])
-                if p_screen:
-                    dist = np.linalg.norm(np.array(p_screen) - eraser_pos)
-                    if dist > radius:
-                         new_lines.append(stroke)
-                continue
-
-            # Segment based erasure
-            # We rebuild the stroke.
             current_segment = []
             
-            for i in range(len(stroke)):
-                p3d = stroke[i]
+            # Optimization: Check bounding box of stroke first (screen space)? 
+            # Skip for now.
+            
+            # Segment based erasure (Simpler version: Delete checks points)
+            keep_stroke = True
+            
+            for p3d in stroke:
                 p2d = self.project_point(p3d)
-                
-                # If point is behind camera, we can't really erase it properly visually, keep it?
-                # Or assume it's not interactable.
                 if p2d is None:
                     current_segment.append(p3d)
                     continue
                 
-                p2d_arr = np.array(p2d)
-                dist_point = np.linalg.norm(p2d_arr - eraser_pos)
-                
-                # Check point itself
-                if dist_point <= radius:
-                    # Point is erased. Break segment.
+                dist = np.linalg.norm(np.array(p2d) - eraser_pos)
+                if dist <= radius:
+                    # Break segment
                     if current_segment:
-                        if len(current_segment) > 1: # Only save valid lines? or points too?
-                             # Actually keep single points if they are leftovers
-                             new_lines.append(current_segment)
-                        elif len(current_segment) == 1:
-                             # Keep single dots
-                             new_lines.append(current_segment)
-                        current_segment = []
-                    continue # Skip adding this point
-                
-                # Check segment leading to this point
-                segment_erased = False
-                if current_segment:
-                    prev_p3d = current_segment[-1]
-                    prev_p2d = self.project_point(prev_p3d)
-                    
-                    if prev_p2d is not None:
-                        dist_seg = self.get_distance_to_segment_2d(prev_p2d, p2d, eraser_pos)
-                        if dist_seg <= radius:
-                            segment_erased = True
-                
-                if segment_erased:
-                     # Split here.
-                     # The previous segment is valid up to the cut. 
-                     # Simplifying: If a segment is hit, we break the line. 
-                     # We already added the previous point to current_segment.
-                     # So we save current_segment and start fresh.
-                     # Ideally we could calculate exact cut intersection, but splitting at vertex is easier.
-                     if len(current_segment) > 0:
-                         new_lines.append(current_segment)
-                     current_segment = [p3d] # Start new, but wait... 
-                     # If the segment is erased, the geometric connection is broken.
-                     # We shouldn't add the *connection* but we checked the point was safe.
-                     # So p3d is a valid start for a new segment.
-                     pass 
+                        new_lines.append(current_segment)
+                    current_segment = []
                 else:
                     current_segment.append(p3d)
             
-            if len(current_segment) > 0:
+            if current_segment:
                 new_lines.append(current_segment)
                 
         self.lines = new_lines
+        self.selected_indices = [] # Clear selection after erase to avoid index errors
+
+    def add_shape(self, shape_type, x, y, z, scale=0.5):
+        """
+        Add a 3D shape at the given position.
+        Shapes are just strokes (lines) formed into the shape.
+        """
+        center = self.get_world_point(x, y, z)
+        cx, cy, cz = center
+        
+        strokes = []
+        s = scale
+        
+        if shape_type == "CUBE":
+            # 12 Edges
+            # Bottom Square being z-s/2
+            corners = [
+                (cx-s, cy-s, cz-s), (cx+s, cy-s, cz-s), (cx+s, cy+s, cz-s), (cx-s, cy+s, cz-s),
+                (cx-s, cy-s, cz+s), (cx+s, cy-s, cz+s), (cx+s, cy+s, cz+s), (cx-s, cy+s, cz+s)
+            ]
+            # Bottom Loop
+            strokes.append([corners[0], corners[1], corners[2], corners[3], corners[0]])
+            # Top Loop
+            strokes.append([corners[4], corners[5], corners[6], corners[7], corners[4]])
+            # Vertical Pillars
+            strokes.append([corners[0], corners[4]])
+            strokes.append([corners[1], corners[5]])
+            strokes.append([corners[2], corners[6]])
+            strokes.append([corners[3], corners[7]])
+            
+        elif shape_type == "SPHERE":
+            # Lat/Lon lines
+            steps = 10
+            for i in range(steps):
+                lat = math.pi * (i / steps)
+                # ... Math for sphere rings ...
+                pass
+            # Just add a simple cross for now to test
+            strokes.append([(cx-s, cy, cz), (cx+s, cy, cz)])
+            strokes.append([(cx, cy-s, cz), (cx, cy+s, cz)])
+            strokes.append([(cx, cy, cz-s), (cx, cy, cz+s)])
+
+        elif shape_type == "PYRAMID":
+            top = (cx, cy, cz+s)
+            base = [
+                (cx-s, cy-s, cz-s), (cx+s, cy-s, cz-s), (cx+s, cy+s, cz-s), (cx-s, cy+s, cz-s)
+            ]
+            # Base
+            strokes.append([base[0], base[1], base[2], base[3], base[0]])
+            # Sides
+            for b in base:
+                strokes.append([b, top])
+        
+        self.lines.extend(strokes)
 
     def draw_cylinder(self, p1, p2, radius=0.03):
         """
@@ -426,10 +598,16 @@ class Canvas3D:
         # Switch to material coloring
         glColor3f(1.0, 1.0, 1.0) # White base color
         
-        for stroke in self.lines:
+        for i, stroke in enumerate(self.lines):
+            # Highlight Selection
+            if i in self.selected_indices:
+                glColor3f(1.0, 0.0, 0.0) # Red for selection
+            else:
+                glColor3f(1.0, 1.0, 1.0)
+                
             if len(stroke) > 1:
-                for i in range(len(stroke) - 1):
-                    self.draw_cylinder(stroke[i], stroke[i+1], radius=0.03)
+                for j in range(len(stroke) - 1):
+                    self.draw_cylinder(stroke[j], stroke[j+1], radius=0.03)
                     
         # Draw current stroke
         # Semi-transparent green
