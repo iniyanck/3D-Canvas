@@ -138,13 +138,32 @@ def main():
                 
                 ex, ey = (tx + px) // 2, (ty + py) // 2
                 
-                color = (255, 255, 0) # Cyan/Yellowish for Eraser
-                cv2.circle(img, (int(ex), int(ey)), 15, color, cv2.FILLED)
-                cv2.putText(img, "ERASING", (int(ex) + 20, int(ey) - 20), cv2.FONT_HERSHEY_PLAIN, 2, color, 3)
+                # We can approximate ez using the same depth estimate as the index finger
+                ez = (tracker.get_estimated_z(lm_list))
+
+                # Update the check cursor position to match the eraser center
+                # This fixes the visual disconnect where the pink dot (cursor) was at the index finger
+                # while the eraser was operating at the pinky-thumb midpoint.
+                canvas.update_cursor(ex, ey, ez)
                 
-                # Perform Erase at Eraser Coordinates
-                ez = (tracker.get_estimated_z(lm_list)) # Use hand z
-                canvas.erase_at(ex, ey, ez, radius=0.15) 
+                # Convert raw hand coordinates to "Interface" coordinates
+                # This ensures the Yellow Circle appears where the 3D cursor WOULD be if we were drawing
+                corrected_pos = canvas.get_interface_position(ex, ey, ez)
+                
+                if corrected_pos:
+                    sx, sy = corrected_pos
+                    
+                    color = (255, 255, 0) # Cyan/Yellowish for Eraser
+                    radius = 20
+                    # Draw at Adjusted position
+                    cv2.circle(img, (int(sx), int(sy)), radius, color, cv2.FILLED)
+                    cv2.putText(img, "ERASING", (int(sx) + 20, int(sy) - 20), cv2.FONT_HERSHEY_PLAIN, 2, color, 3)
+                    
+                    # Perform Erase at Adjusted Coordinates
+                    canvas.erase_at(sx, sy, radius=radius)
+                else:
+                    # Eraser is behind camera or invalid
+                    pass 
                 
             elif is_fist:
                 pass # Already handled rotation feedback
@@ -176,6 +195,9 @@ def main():
         
         if drawing_now:
             canvas.add_point(x, y, z, start_new_stroke=start_new_stroke)
+        elif was_drawing:
+            # Just stopped drawing, so commit the green stroke to white immediatey
+            canvas.end_stroke()
         
         is_drawing = drawing_now
         was_drawing = is_drawing
