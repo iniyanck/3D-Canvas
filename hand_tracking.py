@@ -189,9 +189,10 @@ class HandTracker:
         return z
 
 
-    def is_drawing_gesture(self, lm_list, threshold_cm=3.0, debug=False):
+    def is_pinching(self, lm_list, threshold_cm=3.0, debug=False):
         """
         Check if index finger and thumb are close (pinched).
+        Used for Drawing / Action.
         threshold_cm: Distance in cm to consider as a pinch.
         """
         if len(lm_list) < 21:
@@ -200,26 +201,26 @@ class HandTracker:
         # Thumb tip (4) and Index tip (8)
         dist_cm = self.get_3d_distance_cm(lm_list, 4, 8)
         
-        # Midpoint for drawing
-        x1, y1 = lm_list[4][1], lm_list[4][2]
-        x2, y2 = lm_list[8][1], lm_list[8][2]
-        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        # Midpoint for drawing (The Pointer)
+        x1, y1, z1 = lm_list[4][1], lm_list[4][2], lm_list[4][3]
+        x2, y2, z2 = lm_list[8][1], lm_list[8][2], lm_list[8][3]
         
-        # Z approximation
-        z1, z2 = lm_list[4][3], lm_list[8][3]
+        # Exact midpoint
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
         cz = (z1 + z2) / 2
         
         if debug:
-            print(f"Draw Dist: {dist_cm:.2f} cm")
+            print(f"Pinch Dist: {dist_cm:.2f} cm")
 
         if dist_cm < threshold_cm:
             return True, (cx, cy, cz)
         else:
             return False, (cx, cy, cz)
 
-    def is_erasing_gesture(self, lm_list, threshold_cm=3.0, debug=False):
+    def is_menu_pinch(self, lm_list, threshold_cm=3.0, debug=False):
         """
         Check if pinky finger and thumb are close (pinched).
+        Used for Menu Selection / Clicking.
         threshold_cm: Distance in cm to consider as an erase pinch.
         """
         if len(lm_list) < 21:
@@ -238,7 +239,7 @@ class HandTracker:
         cz = (z1 + z2) / 2
         
         if debug:
-            print(f"Erase Dist: {dist_cm:.2f} cm")
+            print(f"Menu Pinch Dist: {dist_cm:.2f} cm")
 
         if dist_cm < threshold_cm:
             return True, (cx, cy, cz)

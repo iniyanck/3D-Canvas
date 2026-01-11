@@ -1,5 +1,6 @@
 import cv2
 import time
+import numpy as np
 from hand_tracking import HandTracker, HandSmoother
 from canvas_3d import Canvas3D
 from ui_overlay import UIOverlay
@@ -39,7 +40,13 @@ def main():
     prev_wrist_x = None
     prev_wrist_y = None
     prev_wrist_z = None # For Zoom
+
     spread_start_time = None
+    
+    # Shape Placement State
+    shape_anchor_point = None # (x, y, z) when pinch started
+    is_placing_shape = False
+    was_menu_pinched = False
 
     while True:
         # 1. Capture Frame
@@ -59,156 +66,181 @@ def main():
         drawing_now = False
 
         if len(lm_list) != 0:
-            # We use Index Finger Tip (8) as the primary pointer
-            raw_x, raw_y = lm_list[8][1], lm_list[8][2]
-            
-            # Estimate Z Depth from hand size
+            # --- DEPTH ESTIMATION ---
+            # Use hand size to estimate distance from camera (Global Z)
+            # Positive = Closer, Negative = Further (roughly -2 to +2 range)
             raw_z = tracker.get_estimated_z(lm_list)
             
-            # Smooth the coordinates (returns floats now)
-            x, y, z = smoother.update(raw_x, raw_y, raw_z)
+            # --- POINTER TRACKING ---
+            is_action_pinch, action_pointer = tracker.is_pinching(lm_list, threshold_cm=3.0)
+            is_menu_pinch, menu_pointer = tracker.is_menu_pinch(lm_list, threshold_cm=3.0)
             
-            # Update 3D Cursor position (always)
+            # Unpack Pointers
+            ax, ay, _ = action_pointer 
+            mx, my, _ = menu_pointer
+            
+            # Smooth the Action Pointer
+            # We smooth X, Y, and the Estimated Z (raw_z)
+            x, y, z = smoother.update(ax, ay, raw_z)
+            
+            # Update 3D Cursor position
             canvas.update_cursor(x, y, z)
             
-            # Get 2D Interface Position for UI interaction
-            cursor_pos_2d = canvas.get_interface_position(x, y, z)
-            if cursor_pos_2d:
-                cx, cy = cursor_pos_2d
-            else:
-                cx, cy = raw_x, raw_y # Fallback if behind camera?
-            
-            # Check Fist Gesture for Rotation/Manipulation
+            # --- FIST ROTATION & MOVE (Contextual) ---
+            # Priority: Fist blocks everything else
             is_fist = tracker.is_fist_gesture(lm_list)
             
-            # Check for pinch gesture (Action Trigger)
-            # Increased threshold for easier control. 2.5 cm.
-            pinched, _ = tracker.is_drawing_gesture(lm_list, threshold_cm=2.5)
-            pinch_start = pinched and not was_pinched
-            
-            # --- FIST LOGIC (Rotation / Manipulation) ---
             if is_fist:
-                # Use Wrist (0) for stable tracking
+                # Wrist tracking for rotation/move
                 raw_wx, raw_wy = lm_list[0][1], lm_list[0][2]
                 
-                # Heavy smoothing for gesture control
-                # We use raw_z from above (estimated z)
+                # Use filtered Z for the wrist z as well
                 wx, wy, wz = wrist_smoother.update(raw_wx, raw_wy, raw_z)
                 
                 if prev_wrist_x is not None:
                     dx = wx - prev_wrist_x
                     dy = wy - prev_wrist_y
+                    dz = wz - prev_wrist_z
                     
-                    SENSITIVITY = 0.5
-                    
-                    # If selection exists and Select tool active (or maybe always if selection?)
-                    # Let's say if Selection Exists, Fist manipulates selection, unless we are in Camera Mode?
-                    # User said: "Or if you just do the rotate/pan while selected, it moves around/rotates the selected shape"
                     if canvas.selected_indices:
-                        # Move Selection
-                        canvas.move_selection(dx, dy)
-                        # Rotate Selection? Maybe separate gesture or mode?
-                        # Let's just do Move for now with Fist Pan.
-                        cv2.putText(img, "MOVING SELECTION", (int(raw_wx), int(raw_wy) - 50), cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), 3)
+                        if ui.manipulation_mode == "MOVE":
+                            # Move Object
+                            canvas.move_selection(dx, dy, dz)
+                        else:
+                            # Rotate Object
+                            canvas.rotate_selection(dx * 0.5, dy * 0.5)
                     else:
-                        # Rotate Camera
-                        canvas.rotate(dx * SENSITIVITY, dy * SENSITIVITY)
-                        cv2.putText(img, "ROTATING VIEW", (int(raw_wx), int(raw_wy) - 50), cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 255), 3)
-                    
-                    # Zoom Logic on Z-axis (Forward/Backward)
-                    if prev_wrist_z is not None:
-                        dz = wz - prev_wrist_z
-                        # canvas.zoom(dz)
-                        pass
+                        if ui.manipulation_mode == "MOVE":
+                            # Move Camera (Pan/Zoom)
+                            canvas.pan_camera(dx, dy, dz)
+                        else:
+                            # Rotate Camera
+                            canvas.rotate(dx * 0.5, dy * 0.5)
+                        
+                prev_wrist_x, prev_wrist_y, prev_wrist_z = wx, wy, wz
                 
-                prev_wrist_x, prev_wrist_y = wx, wy
-                prev_wrist_z = wz
+                # Exclusivity: Block other actions if Fist is active
+                drawing_now = False
+                is_action_pinch = False
+                is_menu_pinch = False # Also block menu
+                
             else:
-                prev_wrist_x, prev_wrist_y = None, None
-                prev_wrist_z = None
-                wrist_smoother.reset() # Reset so it doesn't drag from last position
+                prev_wrist_x = None
+                wrist_smoother.reset()
 
-            # --- PINCH LOGIC (UI & Tools) ---
-            if pinched:
-                # 1. UI Interaction
-                if cx < ui.panel_width:
-                    if pinch_start: # Click only once
-                        action = ui.check_click(cx, cy)
-                        if action:
-                            if action == "UNDO":
-                                canvas.undo()
-                            elif action == "REDO":
-                                canvas.redo()
-                            # Tool switching is handled inside check_click updating active_tool
-                else:
-                    # 2. Canvas Interaction
-                    tool = ui.active_tool
+            # --- MENU INTERACTION (Pinky + Thumb) ---
+            # Only if NO fist
+            if not is_fist:
+                # Fix Flickering: Only trigger on "Click" (Transition from False -> True)
+                if is_menu_pinch and not was_menu_pinched:
+                    # Click Event
+                    tool_id = ui.check_click(mx, my)
                     
-                    if tool == "BRUSH":
-                         # Draw
-                         drawing_now = True
-                         
-                    elif tool == "ERASER":
-                        # Erase continuously while pinched
-                         canvas.erase_at(cx, cy, radius=30)
-                         cv2.circle(img, (int(cx), int(cy)), 30, (255, 255, 0), 2)
-                         
-                    elif tool == "SELECT":
-                         if pinch_start:
-                             canvas.select_at(cx, cy)
-                             
-                    elif tool == "SHAPES":
-                         if pinch_start:
-                             # Add cube for now
-                             canvas.add_shape("CUBE", x, y, z)
-                             # Switch back to Select or Brush? Or keep adding shapes?
-                             # Keep adding.
+                    if tool_id:
+                         # State changes handled in ui.check_click or here
+                         if tool_id == "UNDO":
+                             canvas.undo()
+                             ui.active_tool = "BRUSH" 
+                         elif tool_id == "REDO":
+                             canvas.redo()
+                             ui.active_tool = "BRUSH"
             
-            was_pinched = pinched
-            
-            # --- Visual Feedback ---
-            color = (0, 255, 0) if pinched else (0, 0, 255)
-            # Show cursor 2D position
-            if cursor_pos_2d:
-                 cv2.circle(img, (int(cx), int(cy)), 10, color, cv2.FILLED)
-                 if drawing_now:
-                      cv2.putText(img, "DRAWING", (int(cx) + 15, int(cy) - 15), cv2.FONT_HERSHEY_PLAIN, 1, color, 2)
-            
-            # Display Coordinates
-            coord_text = f"X: {x:.1f} Y: {y:.1f} Z: {z:.4f}"
-            cv2.putText(img, coord_text, (100, 50), cv2.FONT_HERSHEY_PLAIN, 2, (255, 0, 0), 2)
-            
-            # Check for spread hands gesture (Clear Canvas)
-            if tracker.is_hands_spread_gesture(img):
-                if spread_start_time is None:
-                    spread_start_time = time.time()
+                was_menu_pinched = is_menu_pinch
                 
-                elapsed = time.time() - spread_start_time
-                if elapsed >= 1.0:
+                # --- ACTION INTERACTION (Index + Thumb) ---
+                if is_action_pinch:
+                    active_tool = ui.active_tool
+                    
+                    if active_tool == "BRUSH":
+                        drawing_now = True
+                        
+                    elif active_tool == "ERASER":
+                        # Erase at current pointer
+                        canvas.erase_at(x, y, radius=30)
+                        cv2.circle(img, (int(x), int(y)), 30, (255, 255, 0), 2)
+                        
+                    elif active_tool == "SELECT":
+                        # Toggle selection
+                        if not was_pinched: # Trigger once on start of pinch
+                            canvas.select_at(x, y)
+                    
+                    elif active_tool == "SHAPES":
+                        # Drag to Create Logic
+                        if not was_pinched:
+                            # START Pinch
+                            shape_anchor_point = canvas.get_world_point_from_view(x, y, z)
+                            is_placing_shape = True
+                        
+                        # HOLD Pinch (Dragging)
+                        if is_placing_shape and shape_anchor_point is not None:
+                            current_point = canvas.get_world_point_from_view(x, y, z)
+                            canvas.preview_shape_bounds(shape_anchor_point, current_point, ui.active_shape_type)
+                
+                # Handle Release (Outside is_action_pinch)
+                if not is_action_pinch and was_pinched:
+                     if is_placing_shape and shape_anchor_point is not None:
+                         # RELEASE Pinch
+                         current_point = canvas.get_world_point_from_view(x, y, z)
+                         canvas.add_shape_bounds(shape_anchor_point, current_point, ui.active_shape_type)
+                         is_placing_shape = False
+                         shape_anchor_point = None
+                         canvas.current_preview_shape = None # Clear preview
+                            
+                was_pinched = is_action_pinch
+
+
+
+            # --- SPREAD CLEAR ---
+            if not is_fist and tracker.is_hands_spread_gesture(img):
+                if spread_start_time is None: mean_val = 0 # Dummy
+                if spread_start_time is None: spread_start_time = time.time()
+                if time.time() - spread_start_time > 1.0:
                     canvas.clear()
-                    cv2.putText(img, "CLEARED", (300, 400), cv2.FONT_HERSHEY_PLAIN, 5, (0, 0, 255), 5)
-                else:
-                    cv2.putText(img, f"HOLD TO CLEAR {1.0-elapsed:.1f}", (300, 400), cv2.FONT_HERSHEY_PLAIN, 3, (0, 165, 255), 3)
+                    cv2.putText(img, "CLEARED", (width//2 - 100, height//2), cv2.FONT_HERSHEY_PLAIN, 3, (0,0,255), 3)
             else:
                 spread_start_time = None
+                
+            # --- VISUALS ---
+            # Draw Action Pointer
+            color = (0,255,0) if is_action_pinch else (0,0,255)
             
+            # Visualize Depth: Scale Z (-2 to +2 rough) to Radius.
+            # User wants: "growing/shrinking dot in the camera as well"
+            # We use z (which is filtered estimated_z, +2 close, -2 far).
+            # Close (+2) -> Big Radius.
+            # Far (-2) -> Small Radius.
+            # Map [-2, 2] -> [5, 30]?
+            
+            # (z + 2) => 0..4
+            # * 5 => 0..20
+            # + 5 => 5..25
+            
+            radius = int(5 + (z + 2.0) * 8)
+            radius = max(4, min(40, radius))
+            
+            cv2.circle(img, (int(x), int(y)), radius, color, -1)
+            
+            # Draw Menu Pointer if active
+            if is_menu_pinch:
+                cv2.circle(img, (int(mx), int(my)), 8, (255,0,255), -1)
+
         else:
-            prev_wrist_x, prev_wrist_y = None, None
-            wrist_smoother.reset()
-            was_pinched = False
-        
-        # 4. Update Canvas (Drawing strokes)
-        start_new_stroke = False
+            # No hands
+            prev_wrist_x = None
+            drawing_now = False
+
+        # 4. Canvas State Update
+        start_new = False
         if drawing_now and not was_drawing:
-            start_new_stroke = True
-        
+            start_new = True
+            
         if drawing_now:
-            canvas.add_point(x, y, z, start_new_stroke=start_new_stroke)
+            canvas.add_point(x, y, z, start_new_stroke=start_new)
         elif was_drawing:
             canvas.end_stroke()
-        
+            
+        was_drawing = drawing_now
         is_drawing = drawing_now
-        was_drawing = is_drawing
 
         # 5. Render 3D Scene
         if not canvas.handle_input():

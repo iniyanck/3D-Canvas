@@ -11,6 +11,7 @@ class Canvas3D:
         self.height = height
         self.points = [] # List of (x, y, z) tuples
         self.lines = []  # List of lists of points (strokes)
+        self.shapes = [] # List of shape dicts: {type, pos, scale, color}
         self.current_stroke = []
         self.cursor_pos = None # (x, y, z) tuple for 3D cursor
         
@@ -24,7 +25,10 @@ class Canvas3D:
         self.rot_y = 0.0 # Yaw
         
         # Camera State
-        self.camera_z = -5.0
+        # Camera State
+        self.camera_z = -3.0 # Distance from pivot (Closer = Pivot feels more "centered" on view)
+        self.target_x = 0.0 # Pivot Point X
+        self.target_y = 0.0 # Pivot Point Y
 
         # Quadric for cylinders/spheres
         self.quadric = gluNewQuadric()
@@ -80,52 +84,99 @@ class Canvas3D:
             self.lines = self.redo_stack.pop()
             self.selected_indices = []
 
-    def get_world_point(self, x, y, z):
+    def get_world_point_from_view(self, x, y, z_relative):
         """
-        Converts screen (x, y) and depth (z) to 3D World Coordinates
-        using the heuristic consistent with add_point.
+        Converts screen (x, y) and View-Relative Depth (z_relative) to 3D World Coordinates.
+        
+        This makes the interaction 'View Consistent'. Moving your hand RIGHT will always move
+        the cursor RIGHT on the screen, regardless of how the 3D world is rotated.
+        
+        z_relative: Depth relative to the camera/screen plane. 
+                    0 = Standard Drawing Plane.
+                    Positive = Closer to Camera.
+                    Negative = Further from Camera.
         """
-        # Map screen coordinates to world coordinates roughly
+        # 1. Normalized Device Coordinates
         norm_x = (x / self.width) * 2 - 1
-        norm_y = -((y / self.height) * 2 - 1) # Flip Y
+        norm_y = -((y / self.height) * 2 - 1)
         
-        # Initial point in Screen Space (before rotation)
-        p_screen = np.array([norm_x * 2, norm_y * 2, z * 2])
+        # 2. View Space Point
+        fov = 45
+        aspect = self.width / self.height
+        tan_half_fov = math.tan(math.radians(fov / 2))
         
-        # Inverse Rotation: Rotate by -rot_x (Pitch) then -rot_y (Yaw)
-        rad_x = np.radians(-self.rot_x)
-        rad_y = np.radians(-self.rot_y)
+        # Base distance for the drawing plane (In front of camera)
+        # We placed camera at self.camera_z (negative value). 
+        # So a point at World(0,0,0) is at Distance = -self.camera_z from Camera.
+        # Let's say standard drawing depth is fixed distance from Camera.
+        DRAWING_DIST = -self.camera_z # Draw roughly at the pivot point
         
-        # Rotation Matrix for X (Pitch)
+        # Apply hand depth (z_relative is roughly -2 to +2 now)
+        # Closer Hand (Positive Z) -> Smaller Depth (Closer to Camera)
+        # Farther Hand (Negative Z) -> Larger Depth (Farther from Camera)
+        depth = DRAWING_DIST - z_relative * 1.0 # Tuned to 1.0 from 25.0
+        
+        # Clamp depth to avoid behind camera clipping (Camera at 0, Near Plane at 0.1)
+        depth = max(0.5, depth)
+        
+        # View Space Coordinates
+        # x_view = x_ndc * depth * aspect * tan_half_fov
+        # y_view = y_ndc * depth * tan_half_fov
+        # z_view = -depth
+        
+        x_view = norm_x * depth * aspect * tan_half_fov
+        y_view = norm_y * depth * tan_half_fov
+        z_view = -depth
+        
+        p_view = np.array([x_view, y_view, z_view])
+        
+        # 3. Transform View Space -> World Space
+        # New Orbit Logic: View = T_back * R * T_center_inv * World
+        # World = T_center * InvR * InvT_back * View
+        
+        # InvT_back (0, 0, camera_z)
+        p_temp = p_view - np.array([0, 0, self.camera_z])
+        
+        # InvR (Same as before)
+        rad_x = np.radians(self.rot_x)
+        rad_y = np.radians(self.rot_y)
+        
         rx_mat = np.array([
             [1, 0, 0],
             [0, np.cos(rad_x), -np.sin(rad_x)],
             [0, np.sin(rad_x), np.cos(rad_x)]
         ])
         
-        # Rotation Matrix for Y (Yaw)
         ry_mat = np.array([
             [np.cos(rad_y), 0, np.sin(rad_y)],
             [0, 1, 0],
             [-np.sin(rad_y), 0, np.cos(rad_y)]
         ])
         
-        # Apply Inverse: Inv(Ry) * Inv(Rx) * P_screen
-        p_temp = np.dot(rx_mat, p_screen)
-        p_final = np.dot(ry_mat, p_temp)
+        inv_rx = rx_mat.T
+        inv_ry = ry_mat.T
         
-        return tuple(p_final)
+        p_temp = np.dot(inv_rx, p_temp)
+        p_temp = np.dot(inv_ry, p_temp)
+        
+        # InvT_center_inv = T_center (+target_x, +target_y)
+        p_world = p_temp + np.array([self.target_x, self.target_y, 0])
+        
+        return tuple(p_world)
 
     def get_interface_position(self, x, y, z):
         """
         Returns the screen pixel coordinates (sx, sy) where the 3D cursor 
-        corresponding to input (x, y, z) would appear.
+        corresponding to input screen(x, y) and relative_z would appear.
+        This is basically identity because input x,y ARE screen coords.
+        But we might want to know where the *projected world point* is?
+        If we use view-dependent mapping, input (x,y) -> World Point -> Projects back to same (x,y).
+        So just return x,y.
         """
-        world_pt = self.get_world_point(x, y, z)
-        return self.project_point(world_pt)
+        return x, y
 
     def add_point(self, x, y, z, start_new_stroke=False):
-        world_point = self.get_world_point(x, y, z)
+        world_point = self.get_world_point_from_view(x, y, z)
 
         if start_new_stroke:
             if self.current_stroke:
@@ -158,9 +209,8 @@ class Canvas3D:
         """
         Update the position of the 3D cursor (without drawing).
         """
-        norm_x = (x / self.width) * 2 - 1
-        norm_y = -((y / self.height) * 2 - 1) # Flip Y
-        self.cursor_pos = (norm_x * 2, norm_y * 2, z * 2)
+        # Use precise unprojection
+        self.cursor_pos = self.get_world_point_from_view(x, y, z)
 
 
     def clear(self):
@@ -244,19 +294,16 @@ class Canvas3D:
                 new_stroke.append(tuple(new_p))
             self.lines[idx] = new_stroke
 
-    def move_selection(self, dx, dy):
+    def move_selection(self, dx, dy, dz=0.0):
         """
         Move selected lines in screen plane (approximate).
-        We map dx, dy (interface coords roughly?) or world?
-        Let's assume dx, dy are World Space deltas for simplicity first, 
-        or we need to map View Space delta to World Space delta.
         """
-        # Simplest: Just add to X and Y (since we are drawing in 3D but logic is View-based).
-        # Actually our gestures give us 'dx' 'dy' in pixel-like or arbitrary units.
-        # We need to scale them to world units.
+        scale_xy = 0.01
+        scale_z = 0.5 # Boost Z sensitivity
         
-        scale = 0.01
-        move_vec = np.array([dx * scale, -dy * scale, 0]) # Flip Y for world
+        # Hand Right (+dx) -> Object Right (+X).
+        # Hand Pull (Back/-dz) -> Object Closer (+Z). (So -dz)
+        move_vec = np.array([dx * scale_xy, -dy * scale_xy, -dz * scale_z])
         
         # We should rotate this move_vec by the inverse of the Camera Rotation
         # so that "Right" means "Right on Screen".
@@ -285,6 +332,45 @@ class Canvas3D:
                 new_p = np.array(p) + move_vec
                 new_stroke.append(tuple(new_p))
             self.lines[idx] = new_stroke
+
+    def pan_camera(self, dx, dy, dz=0.0):
+        """
+        Pan by moving the Pivot Target.
+        """
+        scale_xy = 0.02
+        scale_z = 1.0 # Boost Z sensitivity for Zoom
+        
+        # Hand Right (dx>0) -> Target Left (-dx) -> Content Right. Correct.
+        # Hand Up (dy<0) -> Target Down (+dy neg) -> Content Up. Correct.
+        # Pull (dz<0) -> Camera Z Increase (Closer). Correct.
+        
+        pan_vec = np.array([-dx * scale_xy, dy * scale_xy, 0])
+        
+        rad_x = np.radians(-self.rot_x)
+        rad_y = np.radians(-self.rot_y)
+        
+        rx_mat = np.array([
+            [1, 0, 0],
+            [0, np.cos(rad_x), -np.sin(rad_x)],
+            [0, np.sin(rad_x), np.cos(rad_x)]
+        ])
+        ry_mat = np.array([
+            [np.cos(rad_y), 0, np.sin(rad_y)],
+            [0, 1, 0],
+            [-np.sin(rad_y), 0, np.cos(rad_y)]
+        ])
+        
+        pan_vec = np.dot(rx_mat, pan_vec)
+        pan_vec = np.dot(ry_mat, pan_vec)
+        
+        self.target_x += pan_vec[0]
+        self.target_y += pan_vec[1]
+        
+        # Apply Depth (dz) to Camera Z (Zoom)
+        # Invert dz: Pull (neg) -> Zoom In (Increase Cam Z)
+        self.camera_z -= dz * scale_z
+        self.camera_z = max(-20.0, min(-0.5, self.camera_z))
+
 
     def select_at(self, screen_x, screen_y, radius=30):
         """
@@ -367,11 +453,18 @@ class Canvas3D:
         # P_eye = M * P_world = RotX * (RotY * P_world).
         # So yes, Yaw (Y) first, then Pitch (X).
         
+        # 0. Apply Target Offset (Important Fix!)
+        # Render Order: T(cz) * Rot * T(-target)
+        # Projection Order: Rot * (P - Target) + cz ??
+        # Yes: V_view = Rot * (P_world - Target) + [0,0,cz]
+        
+        tx, ty, tz = x - self.target_x, y - self.target_y, z
+        
         rad_x = np.radians(self.rot_x)
         rad_y = np.radians(self.rot_y)
         
         # Rotate Y
-        rx, ry, rz = x, y, z
+        rx, ry, rz = tx, ty, tz
         new_x = rx * np.cos(rad_y) + rz * np.sin(rad_y)
         new_z = -rx * np.sin(rad_y) + rz * np.cos(rad_y)
         rx, rz = new_x, new_z
@@ -477,6 +570,29 @@ class Canvas3D:
                 new_lines.append(current_segment)
                 
         self.lines = new_lines
+        
+        # Erase Shapes too
+        new_shapes = []
+        for shape in self.shapes:
+             # Check if bounding box overlaps roughly
+             keep = True
+             if "bounds" in shape:
+                 p1, p2 = shape["bounds"]
+                 # Simple check: Is center close? Or project corners
+                 center = (np.array(p1)+np.array(p2)) / 2
+                 p2d = self.project_point(center)
+                 if p2d:
+                     dist = np.linalg.norm(np.array(p2d) - eraser_pos)
+                     # Approximate radius for shape:
+                     shape_r = np.linalg.norm(np.array(p2) - np.array(p1)) * 0.5
+                     # Project shape_r to screen? Hard.
+                     # Simple heuristic: if center is within eraser radius + 20 px
+                     if dist < radius + 10: 
+                         keep = False
+             if keep:
+                 new_shapes.append(shape)
+        self.shapes = new_shapes
+        
         self.selected_indices = [] # Clear selection after erase to avoid index errors
 
     def add_shape(self, shape_type, x, y, z, scale=0.5):
@@ -484,7 +600,7 @@ class Canvas3D:
         Add a 3D shape at the given position.
         Shapes are just strokes (lines) formed into the shape.
         """
-        center = self.get_world_point(x, y, z)
+        center = self.get_world_point_from_view(x, y, z)
         cx, cy, cz = center
         
         strokes = []
@@ -532,6 +648,186 @@ class Canvas3D:
         
         self.lines.extend(strokes)
 
+        self.lines.extend(strokes)
+
+    def add_shape_bounds(self, p1, p2, shape_type, color=(1.0, 1.0, 1.0)):
+        """
+        Add a solid shape defined by two corner points (min/max).
+        """
+        # Calculate bounds
+        pos1 = np.array(p1)
+        pos2 = np.array(p2)
+        
+        self.shapes.append({
+            "type": shape_type,
+            "bounds": (pos1, pos2),
+            "color": color
+        })
+
+    def draw_solid_cube_bounds(self, p1, p2, color):
+        min_x = min(p1[0], p2[0])
+        max_x = max(p1[0], p2[0])
+        min_y = min(p1[1], p2[1])
+        max_y = max(p1[1], p2[1])
+        min_z = min(p1[2], p2[2])
+        max_z = max(p1[2], p2[2])
+        
+        glPushMatrix()
+        # No translate, we draw in world coords directly
+        glColor3f(*color)
+        
+        glBegin(GL_QUADS)
+        
+        # Front Face (Z Max)
+        glNormal3f(0.0, 0.0, 1.0)
+        glVertex3f(min_x, min_y, max_z)
+        glVertex3f(max_x, min_y, max_z)
+        glVertex3f(max_x, max_y, max_z)
+        glVertex3f(min_x, max_y, max_z)
+        
+        # Back Face (Z Min)
+        glNormal3f(0.0, 0.0, -1.0)
+        glVertex3f(min_x, min_y, min_z)
+        glVertex3f(min_x, max_y, min_z)
+        glVertex3f(max_x, max_y, min_z)
+        glVertex3f(max_x, min_y, min_z)
+        
+        # Top Face (Y Max)
+        glNormal3f(0.0, 1.0, 0.0)
+        glVertex3f(min_x, max_y, min_z)
+        glVertex3f(min_x, max_y, max_z)
+        glVertex3f(max_x, max_y, max_z)
+        glVertex3f(max_x, max_y, min_z)
+        
+        # Bottom Face (Y Min)
+        glNormal3f(0.0, -1.0, 0.0)
+        glVertex3f(min_x, min_y, min_z)
+        glVertex3f(max_x, min_y, min_z)
+        glVertex3f(max_x, min_y, max_z)
+        glVertex3f(min_x, min_y, max_z)
+        
+        # Right face (X Max)
+        glNormal3f(1.0, 0.0, 0.0)
+        glVertex3f(max_x, min_y, min_z)
+        glVertex3f(max_x, max_y, min_z)
+        glVertex3f(max_x, max_y, max_z)
+        glVertex3f(max_x, min_y, max_z)
+        
+        # Left Face (X Min)
+        glNormal3f(-1.0, 0.0, 0.0)
+        glVertex3f(min_x, min_y, min_z)
+        glVertex3f(min_x, min_y, max_z)
+        glVertex3f(min_x, max_y, max_z)
+        glVertex3f(min_x, max_y, min_z)
+        
+        glEnd()
+        glPopMatrix()
+
+    def draw_wireframe_cube_bounds(self, p1, p2, color):
+        min_x = min(p1[0], p2[0])
+        max_x = max(p1[0], p2[0])
+        min_y = min(p1[1], p2[1])
+        max_y = max(p1[1], p2[1])
+        min_z = min(p1[2], p2[2])
+        max_z = max(p1[2], p2[2])
+        
+        glPushMatrix()
+        glColor3f(*color)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+        glLineWidth(2.0)
+        
+        glBegin(GL_QUADS)
+        # Front
+        glVertex3f(min_x, min_y, max_z); glVertex3f(max_x, min_y, max_z); glVertex3f(max_x, max_y, max_z); glVertex3f(min_x, max_y, max_z)
+        # Back
+        glVertex3f(min_x, min_y, min_z); glVertex3f(max_x, min_y, min_z); glVertex3f(max_x, max_y, min_z); glVertex3f(min_x, max_y, min_z)
+        # Top
+        glVertex3f(min_x, max_y, min_z); glVertex3f(min_x, max_y, max_z); glVertex3f(max_x, max_y, max_z); glVertex3f(max_x, max_y, min_z)
+        # Bottom
+        glVertex3f(min_x, min_y, min_z); glVertex3f(max_x, min_y, min_z); glVertex3f(max_x, min_y, max_z); glVertex3f(min_x, min_y, max_z)
+        # Right
+        glVertex3f(max_x, min_y, min_z); glVertex3f(max_x, max_y, min_z); glVertex3f(max_x, max_y, max_z); glVertex3f(max_x, min_y, max_z)
+        # Left
+        glVertex3f(min_x, min_y, min_z); glVertex3f(min_x, min_y, max_z); glVertex3f(min_x, max_y, max_z); glVertex3f(min_x, max_y, min_z)
+        glEnd()
+        
+        glLineWidth(1.0)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+        glPopMatrix()
+
+    def add_solid_shape(self, shape_type, x, y, z, scale=0.5, color=(0.0, 0.0, 1.0)):
+        # Deprecated logic kept for compatibility if needed, but we prefer bounds now.
+        # Convert pt+scale to bounds
+        center = self.get_world_point_from_view(x, y, z)
+        p1 = center - scale
+        p2 = center + scale
+        # White color default
+        self.add_shape_bounds(p1, p2, shape_type, color=(1.0, 1.0, 1.0))
+        
+    def preview_shape_bounds(self, p1, p2, shape_type):
+        self.current_preview_shape = {"type": shape_type, "bounds": (p1, p2)}
+
+    def draw_solid_cube(self, center, size, color):
+         # Legacy wrapper
+         self.draw_solid_cube_bounds(np.array(center)-size, np.array(center)+size, color)
+
+    def draw_solid_sphere(self, center, radius, color):
+        cx, cy, cz = center
+        glPushMatrix()
+        glTranslatef(cx, cy, cz)
+        glColor3f(*color)
+        gluSphere(self.quadric, radius, 16, 16)
+        glPopMatrix()
+
+    def draw_solid_pyramid(self, center, size, color):
+        # Todo: bounds version
+        cx, cy, cz = center
+        s = size
+        glPushMatrix()
+        glTranslatef(cx, cy, cz)
+        glColor3f(*color)
+        
+        glBegin(GL_TRIANGLES)
+        # Front
+        glNormal3f(0.0, 0.5, 1.0) # Approx normal
+        glVertex3f( 0.0, s, 0.0)
+        glVertex3f(-s, -s, s)
+        glVertex3f( s, -s, s)
+        
+        # Right
+        glNormal3f(1.0, 0.5, 0.0)
+        glVertex3f(0.0, s, 0.0)
+        glVertex3f(s, -s, s)
+        glVertex3f(s, -s, -s)
+        
+        # Back
+        glNormal3f(0.0, 0.5, -1.0)
+        glVertex3f(0.0, s, 0.0)
+        glVertex3f(s, -s, -s)
+        glVertex3f(-s, -s, -s)
+        
+        # Left
+        glNormal3f(-1.0, 0.5, 0.0)
+        glVertex3f(0.0, s, 0.0)
+        glVertex3f(-s, -s, -s)
+        glVertex3f(-s, -s, s)
+        glEnd()
+        
+        # Bottom
+        glBegin(GL_QUADS)
+        glNormal3f(0.0, -1.0, 0.0)
+        glVertex3f(-s, -s, s)
+        glVertex3f(-s, -s, -s)
+        glVertex3f( s, -s, -s)
+        glVertex3f( s, -s, s)
+        glEnd()
+
+        glPopMatrix()
+
+    def preview_shape(self, shape_type, x, y, z, scale=0.5):
+        # Legacy
+        pass # We use bounds now
+
     def draw_cylinder(self, p1, p2, radius=0.03):
         """
         Draws a cylinder between two points p1 and p2.
@@ -555,11 +851,17 @@ class Canvas3D:
         # Axis of rotation = z_axis x v
         r_axis = np.cross(z_axis, v)
         
-        # Angle = acos(z_axis . v)
-        dot_product = np.dot(z_axis, v)
-        angle = math.degrees(math.acos(np.clip(dot_product, -1.0, 1.0)))
-        
-        glRotatef(angle, *r_axis)
+        # Check for zero vector (parallel)
+        if np.linalg.norm(r_axis) == 0:
+             # Angle is 0 or 180.
+             if dz < 0: # 180 degrees
+                 glRotatef(180, 1, 0, 0)
+             # else 0 degrees, do nothing
+        else:
+             # Angle = acos(z_axis . v)
+             dot_product = np.dot(z_axis, v)
+             angle = math.degrees(math.acos(np.clip(dot_product, -1.0, 1.0)))
+             glRotatef(angle, *r_axis)
         
         gluCylinder(self.quadric, radius, radius, dist, 16, 1) # Increased slices 6 -> 16
         glPopMatrix()
@@ -575,8 +877,13 @@ class Canvas3D:
         glLoadIdentity() # Reset view matrix
         
         # Camera Setup
+        # Camera Setup
         gluPerspective(45, (self.width / self.height), 0.1, 50.0)
-        glTranslatef(0.0, 0.0, self.camera_z) # Move camera back using dynamic Z
+        # Orbit Transform
+        glTranslatef(0, 0, self.camera_z) # Move back
+        glRotatef(self.rot_x, 1, 0, 0)
+        glRotatef(self.rot_y, 0, 1, 0)
+        glTranslatef(-self.target_x, -self.target_y, 0) # Center on target
         
         # Update Dynamic Light (Cursor Light) Position
         if self.cursor_pos:
@@ -589,11 +896,138 @@ class Canvas3D:
 
         # --- World Rendering (Rotated) ---
         glPushMatrix()
+        # Rotation already applied in view, so we are in world coords!
+        # DO NOT APPLY ROTATION HERE AGAIN!
+        # Wait, previous logic was: Camera Translate -> Rotate World.
+        # Orbit Logic: Camera View Matrix includes Rotation.
+        # So "Coordinate System" is World Space from here on.
+        # So remove glRotatef here.
         
-        # Apply Rotation
-        glRotatef(self.rot_x, 1, 0, 0) # Rotate X
-        glRotatef(self.rot_y, 0, 1, 0) # Rotate Y
+        # Draw Solid Shapes
+        for shape in self.shapes:
+            if "bounds" in shape:
+                if shape["type"] == "CUBE":
+                    self.draw_solid_cube_bounds(shape["bounds"][0], shape["bounds"][1], shape["color"])
+                # Fallback for others (TODO)
+                elif shape["type"] == "SPHERE":
+                     p1, p2 = shape["bounds"]
+                     # bounds to center + scale
+                     center = (p1 + p2) / 2
+                     dims = np.abs(p2 - p1) / 2 # Half-extents
+                     
+                     glPushMatrix()
+                     glTranslatef(*center)
+                     glScalef(*dims)
+                     glColor3f(*shape["color"])
+                     # Draw Unit Sphere
+                     gluSphere(self.quadric, 1.0, 16, 16)
+                     glPopMatrix()
+
+                elif shape["type"] == "PYRAMID":
+                     p1, p2 = shape["bounds"]
+                     center = (p1 + p2) / 2
+                     dims = np.abs(p2 - p1) / 2
+                     
+                     glPushMatrix()
+                     glTranslatef(*center)
+                     glScalef(*dims)
+                     glColor3f(*shape["color"])
+                     # Draw Unit Pyramid (Base at -1 to 1, Tip at +1??)
+                     # My draw_solid_pyramid was centered at 0, size s.
+                     # Let's inline a unit pyramid here or call a helper.
+                     # Unit Pyramid: Base on Y=-1 plane? Tip at Y=1?
+                     # Let's define a Unit Pyramid fitting in [-1,1]^3
+                     
+                     glBegin(GL_TRIANGLES)
+                     # Front (Z+)
+                     glNormal3f(0, 0.5, 1); glVertex3f(0, 1, 0); glVertex3f(-1, -1, 1); glVertex3f(1, -1, 1)
+                     # Right (X+)
+                     glNormal3f(1, 0.5, 0); glVertex3f(0, 1, 0); glVertex3f(1, -1, 1); glVertex3f(1, -1, -1)
+                     # Back (Z-)
+                     glNormal3f(0, 0.5, -1); glVertex3f(0, 1, 0); glVertex3f(1, -1, -1); glVertex3f(-1, -1, -1)
+                     # Left (X-)
+                     glNormal3f(-1, 0.5, 0); glVertex3f(0, 1, 0); glVertex3f(-1, -1, -1); glVertex3f(-1, -1, 1)
+                     glEnd()
+                     
+                     # Base
+                     glBegin(GL_QUADS)
+                     glNormal3f(0, -1, 0)
+                     glVertex3f(-1, -1, 1); glVertex3f(-1, -1, -1); glVertex3f(1, -1, -1); glVertex3f(1, -1, 1)
+                     glEnd()
+
+                     glPopMatrix()
+            else:
+                 # Legacy
+                 if shape["type"] == "CUBE":
+                     self.draw_solid_cube(shape["pos"], shape["scale"], shape["color"])
+                 elif shape["type"] == "SPHERE":
+                     self.draw_solid_sphere(shape["pos"], shape["scale"], shape["color"])
+                 elif shape["type"] == "PYRAMID":
+                     self.draw_solid_pyramid(shape["pos"], shape["scale"], shape["color"])
         
+        # Draw Preview Shape if exists
+        if hasattr(self, 'current_preview_shape') and self.current_preview_shape:
+             s = self.current_preview_shape
+             glEnable(GL_BLEND)
+             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+             # Semi-transparent ghost
+             
+             if "bounds" in s:
+             # Semi transparent inner shape
+                 p1, p2 = s["bounds"]
+                 type = s.get("type", "CUBE")
+                 
+                 # Draw WIREFRAME Bounds
+                 self.draw_wireframe_cube_bounds(p1, p2, (1, 1, 1))
+
+                 # Draw Solid Shape (Ghost)
+                 glColor4f(1.0, 1.0, 1.0, 0.3)
+
+                 
+                 if type == "CUBE":
+                     self.draw_solid_cube_bounds(p1, p2, (1,1,1))
+                 elif type == "PYRAMID":
+                     # Use the same inline logic as main render or helper
+                     # For preview, simple bounds box is okay but actual shape is better
+                     # Let's copy-paste the Pyramid render logic briefly or reuse if possible.
+                     # Since we don't have a helper for bounds-pyramid yet (it was inline), 
+                     # let's just use Cube for now to avoid code duplication, OR implement the helper.
+                     # Actually, for preview, let's just show the Cube Bounds for all to indicate AREA
+                     # BUT user might want to see the shape.
+                     # Let's stick to Cube Bounds for now as per my previous thought, BUT add a text or color?
+                     # Wait, if user says "Can't place shapes", maybe they meant it fails?
+                     # Let's just fix the Cube Bounds to be generic. 
+                     # Retaining Cube for all is safer for "bounds" visualization.
+                     self.draw_solid_cube_bounds(p1, p2, (1,1,1))
+                 elif type == "SPHERE":
+                     # Sphere is defined by bounds center/radius
+                     center = (np.array(p1) + np.array(p2)) / 2
+                     dims = np.abs(np.array(p2) - np.array(p1)) / 2
+                     glPushMatrix()
+                     glTranslatef(*center)
+                     glScalef(*dims)
+                     gluSphere(self.quadric, 1.0, 16, 16)
+                     glPopMatrix()
+             
+             # Reset
+             self.current_preview_shape = None
+             glDisable(GL_BLEND)
+
+        # Draw all finished strokes(GL_BLEND)
+
+        # Draw Cursor INSIDE the rotated world (so it stays synced)
+        if self.cursor_pos:
+            glPushMatrix()
+            glTranslatef(*self.cursor_pos)
+            
+            # Simple Sphere for Cursor
+            glColor3f(1.0, 0.0, 1.0) # Purple cursor
+            glDisable(GL_LIGHTING)
+            gluSphere(self.quadric, 0.15, 10, 10)
+            glEnable(GL_LIGHTING)
+            
+            glPopMatrix()
+
         # Draw all finished strokes
         # Switch to material coloring
         glColor3f(1.0, 1.0, 1.0) # White base color
@@ -631,21 +1065,8 @@ class Canvas3D:
             
         glPopMatrix()
         # --- End World Rendering ---
-
-        # --- Cursor Rendering (Screen/Camera Space) ---
-        if self.cursor_pos:
-            glPushMatrix()
-            glTranslatef(*self.cursor_pos)
-            
-            # Simple Sphere for Cursor
-            glColor3f(1.0, 0.0, 1.0) # Purple cursor
-            # Disable lighting for the cursor itself so it always glows? 
-            # Or keep it lit. Let's disable for it to appear "bright"
-            glDisable(GL_LIGHTING)
-            gluSphere(self.quadric, 0.15, 10, 10)
-            glEnable(GL_LIGHTING)
-            
-            glPopMatrix()
+        
+        # Removed Cursor Rendering from here (moved inside)
 
         pygame.display.flip()
 
