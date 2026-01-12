@@ -589,6 +589,36 @@ class Canvas3D:
         self.target_z += pan_vec[2]
         self.camera_z = max(-20.0, min(-0.5, self.camera_z - dz * scale_z))
 
+    def get_camera_position_world(self):
+        # Cam at (0,0,0) in View Space
+        # v_world = T(target) * Inv(Ry) * Inv(Rx) * Inv(T(z)) * v_view
+        
+        # 1. Inverse Camera Z Translation
+        p = np.array([0.0, 0.0, -self.camera_z])
+        
+        # 2. Inverse Rx
+        rad_x = np.radians(-self.rot_x)
+        rx_mat = np.array([
+            [1, 0, 0],
+            [0, np.cos(rad_x), -np.sin(rad_x)],
+            [0, np.sin(rad_x), np.cos(rad_x)]
+        ])
+        p = np.dot(rx_mat, p)
+        
+        # 3. Inverse Ry
+        rad_y = np.radians(-self.rot_y)
+        ry_mat = np.array([
+            [np.cos(rad_y), 0, np.sin(rad_y)],
+            [0, 1, 0],
+            [-np.sin(rad_y), 0, np.cos(rad_y)]
+        ])
+        p = np.dot(ry_mat, p)
+        
+        # 4. Inverse Target Translation
+        p += np.array([self.target_x, self.target_y, self.target_z])
+        
+        return p
+
     def rotate(self, d_yaw, d_pitch):
         self.rot_y += d_yaw
         self.rot_x += d_pitch
@@ -597,7 +627,7 @@ class Canvas3D:
     
     # --- SHAPES ---
     
-    def _create_shape_dict(self, p1, p2, shape_type, rotation=0.0, smoothness=5):
+    def _create_shape_dict(self, p1, p2, shape_type, rotation=0.0):
         # Convert Bounds -> Center + Size + Rotation
         # p1, p2 are world points of the drag diagonal
         # We assume the drag defines the size in the VIEW, but we map it to WORLD size
@@ -631,17 +661,16 @@ class Canvas3D:
             "size": size,
             "color": self.current_color,
             "thickness": self.current_thickness,
-            "smoothness": smoothness,
             "rotation_matrix": rot_mat
         }
 
-    def add_shape_bounds(self, p1, p2, shape_type, rotation=0.0, smoothness=5):
+    def add_shape_bounds(self, p1, p2, shape_type, rotation=0.0):
         self.save_state()
-        shape = self._create_shape_dict(p1, p2, shape_type, rotation, smoothness)
+        shape = self._create_shape_dict(p1, p2, shape_type, rotation)
         self.shapes.append(shape)
 
-    def preview_shape_bounds(self, p1, p2, shape_type, rotation=0.0, smoothness=5):
-        self.current_preview_shape = self._create_shape_dict(p1, p2, shape_type, rotation, smoothness)
+    def preview_shape_bounds(self, p1, p2, shape_type, rotation=0.0):
+        self.current_preview_shape = self._create_shape_dict(p1, p2, shape_type, rotation)
 
     def draw_wireframe_cube_bounds(self, p1, p2, color):
         pass # Not used
@@ -743,34 +772,23 @@ class Canvas3D:
         
         color = shape_dict.get("color", (1,1,1))
         type = shape_dict.get("type", "CUBE")
-        smoothness = shape_dict.get("smoothness", 5)
-        
-        # Override color if selected
-        if is_selected:
-            color = (1.0, 0.0, 0.0) # Red
-        
-        # Smoothness 1-10 -> Segments 8-64
-        segments = int(8 + (smoothness-1) * 6)
+        # Removing smoothness param, default high segments
+        segments = 32
         
         glPushMatrix()
         glTranslatef(*center)
         
         # Apply Rotation Matrix
-        # OpenGL uses Column-Major order, numpy is Row-Major.
-        # But we need to pass a 4x4 or multiply a 4x4.
         m_4x4 = np.identity(4)
-        m_4x4[:3, :3] = rot_mat.T # Transpose because OpenGL expects column-major data in flat array
-        
+        m_4x4[:3, :3] = rot_mat.T 
         glMultMatrixf(m_4x4.flatten())
         
         glScalef(*size)
         
         if is_ghost:
              self.draw_wireframe_cube_local((1,1,1))
-             
              r,g,b = color if len(color)==3 else (1,1,1)
              rgba = (r, g, b, 0.4) 
-             
              if type == "CUBE":
                  self.draw_solid_cube_local(rgba)
              elif type == "PYRAMID":
@@ -780,16 +798,58 @@ class Canvas3D:
                   gluSphere(self.quadric, 0.5, segments, segments)
 
         else:
+            # Selection Visualization: Semi-transparent + Moving Dotted Outline
+            if is_selected:
+                 r,g,b = color if len(color)==3 else color[:3]
+                 draw_color = (r, g, b, 0.7) # Transparent
+            else:
+                 draw_color = color
+            
+            # 1. Draw Solid
+            # Enable Blending if selected (transparency)
+            if is_selected:
+                glEnable(GL_BLEND)
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                glDepthMask(GL_FALSE)
+
             if type == "CUBE":
-                 self.draw_solid_cube_local(color)
-                 if is_selected:
-                     self.draw_wireframe_cube_local((1,1,0)) # Yellow Outline
+                 self.draw_solid_cube_local(draw_color)
             elif type == "PYRAMID":
-                 self.draw_solid_pyramid_local(color)
+                 self.draw_solid_pyramid_local(draw_color)
             elif type == "SPHERE":
-                 if len(color) == 4: glColor4f(*color)
-                 else: glColor3f(*color)
+                 if len(draw_color) == 4: glColor4f(*draw_color)
+                 else: glColor3f(*draw_color)
                  gluSphere(self.quadric, 0.5, segments, segments)
+            
+            if is_selected:
+                glDepthMask(GL_TRUE)
+                glDisable(GL_BLEND)
+                
+                # 2. Draw Moving Dotted Outline
+                glEnable(GL_LINE_STIPPLE)
+                
+                # Animate stipple: Shift pattern based on time
+                # We need a time variable. passing in time.time() would be best, 
+                # but for now we can just use a static counter from pygame or time module
+                import time
+                shift = int(time.time() * 10) % 16
+                glLineStipple(2, 0xAAAA) # Simple dotted/dashed pattern
+                
+                # Using a slightly larger wireframe to prevent z-fighting
+                glPushMatrix()
+                glScalef(1.01, 1.01, 1.01)
+                
+                if type == "CUBE":
+                    self.draw_wireframe_cube_local((1,1,1))
+                elif type == "PYRAMID":
+                    self.draw_wireframe_pyramid_local((1,1,1))
+                elif type == "SPHERE":
+                    # Sphere wireframe is tricky with glut/glu, just draw a box or rings?
+                    # Let's draw the bounding box for selection mostly
+                    self.draw_wireframe_cube_local((1,1,1))
+                    
+                glPopMatrix()
+                glDisable(GL_LINE_STIPPLE)
         
         glPopMatrix()
 
@@ -837,13 +897,101 @@ class Canvas3D:
         # 3. Strokes
         for i, stroke_data in enumerate(self.lines):
             stroke = stroke_data["points"]
-            color = stroke_data.get("color", (1,1,1))
+            
+            # Unpack color
+            base_color = stroke_data.get("color", (1,1,1))
+            if len(base_color) == 4: r,g,b,a = base_color
+            else: r,g,b = base_color; a = 1.0
+
             thickness = stroke_data.get("thickness", 1)
             radius = 0.01 + (thickness * 0.005)
-            if i in self.selected_indices: color = (1.0, 0.0, 0.0)
+            
+            is_selected = (i in self.selected_indices)
+            
+            if is_selected:
+                 glEnable(GL_BLEND)
+                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                 color = (r, g, b, 0.7) # Transparent
+            else:
+                 color = (r, g, b, a)
+
             if len(stroke) > 1:
                 for j in range(len(stroke) - 1):
                     self.draw_cylinder(stroke[j], stroke[j+1], radius, color)
+            
+            if is_selected:
+                 glDisable(GL_BLEND)
+                 
+                 # Draw View-Dependent Silhouette Lines
+                 glDisable(GL_DEPTH_TEST) # Ensure visibility
+                 glEnable(GL_LINE_STIPPLE)
+                 import time 
+                 shift = int(time.time() * 10) % 16
+                 glLineStipple(2, 0xAAAA) 
+                 
+                 glLineWidth(2.0)
+                 glColor3f(1.0, 1.0, 1.0) # White outline
+                 
+                 # Calculate Silhouette Points
+                 cam_pos = self.get_camera_position_world()
+                 pts = [np.array(p) for p in stroke]
+                 
+                 left_line = []
+                 right_line = []
+                 
+                 # We need at least 2 points to define a tangent
+                 if len(pts) >= 2:
+                     for k in range(len(pts)):
+                         p = pts[k]
+                         
+                         # Calculate Tangent T
+                         if k == 0:
+                             t = pts[k+1] - p
+                         elif k == len(pts) - 1:
+                             t = p - pts[k-1]
+                         else:
+                             # Average tangent
+                             t = pts[k+1] - pts[k-1]
+                         
+                         t_len = np.linalg.norm(t)
+                         if t_len == 0: continue
+                         t = t / t_len
+                         
+                         # Calculate View Vector V
+                         v = cam_pos - p
+                         v_len = np.linalg.norm(v)
+                         if v_len == 0: continue
+                         v = v / v_len
+                         
+                         # Calculate Side Vector S = Cross(V, T)
+                         s = np.cross(v, t)
+                         s_len = np.linalg.norm(s)
+                         # If looking straight down the tube, s might be 0
+                         if s_len < 0.001: 
+                             # Fallback? just skip
+                             continue
+                         s = s / s_len
+                         
+                         # Offset points
+                         offset = s * radius * 1.0 # Exact radius or slightly larger?
+                         left_line.append(p + offset)
+                         right_line.append(p - offset)
+                 
+                 # Draw Left Line
+                 glBegin(GL_LINE_STRIP)
+                 for p in left_line:
+                     glVertex3f(*p)
+                 glEnd()
+                 
+                 # Draw Right Line
+                 glBegin(GL_LINE_STRIP)
+                 for p in right_line:
+                     glVertex3f(*p)
+                 glEnd()
+                 
+                 glLineWidth(1.0)
+                 glDisable(GL_LINE_STIPPLE)
+                 glEnable(GL_DEPTH_TEST)
 
         # 4. Current Stroke
         glEnable(GL_BLEND)
@@ -882,7 +1030,10 @@ class Canvas3D:
 
         glPushMatrix()
         glTranslatef(p1[0], p1[1], p1[2])
-        glColor3f(*color)
+        if len(color) == 4:
+            glColor4f(*color)
+        else:
+            glColor3f(*color)
         
         v = np.array([dx, dy, dz]) / dist
         z_axis = np.array([0, 0, 1])

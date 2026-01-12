@@ -22,7 +22,7 @@ class UIOverlay:
         self.brush_color = (0, 255, 0) # Green default
         self.brush_opacity = 1.0 
         
-        self.shape_smoothness = 5
+
         self.shape_color = (255, 255, 255) # White default
         self.shape_opacity = 1.0
         
@@ -170,10 +170,7 @@ class UIOverlay:
                  cv2.putText(img, t, (sub_x + 10, current_y + 20), font, 1, (255, 255, 255), 1)
                  current_y += 40
              
-             current_y += 20
-             # Smoothness
-             self.shape_smoothness = self.draw_slider(img, "Smoothness", self.shape_smoothness, 1, 10, sub_x, current_y)
-             current_y += 60
+
              
              # Color Picker
              self.shape_color = self.draw_color_picker(img, "Color", self.shape_color, sub_x, current_y)
@@ -250,13 +247,7 @@ class UIOverlay:
                               # Note: We DON'T close submenu here, user might want to set color too
                               return "SHAPE_TYPE_SELECTED"
                           current_y += 40
-                      current_y += 20
-                      # Smoothness
-                      if current_y <= y <= current_y + 20:
-                          norm = (x - sub_x) / 200.0
-                          self.shape_smoothness = 1 + max(0, min(1, norm)) * 9
-                          return "UPDATE_SETTINGS"
-                      current_y += 60
+
                       # Color
                       size = 30
                       cols = 4

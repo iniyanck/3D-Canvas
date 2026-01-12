@@ -45,6 +45,8 @@ def main():
     was_fist = False
 
     spread_start_time = None
+    last_spread_valid_time = 0
+
     
     # Shape Placement State
     shape_anchor_point = None # (x, y, z) when pinch started
@@ -54,8 +56,11 @@ def main():
     
     cleared_display_start_time = None
 
+    
     while True:
         # 1. Capture Frame
+
+
         success, img = cap.read()
         if not success:
             print("Ignoring empty camera frame.")
@@ -135,6 +140,15 @@ def main():
                 
                 was_fist = True
                 
+                # Cancel Shape Placement & Reset States to prevent overlap/glitches
+                is_placing_shape = False
+                shape_anchor_point = None
+                canvas.current_preview_shape = None
+                
+                # Reset touch history so we don't trigger "click on release" after rotation ends
+                was_pinched = False
+                was_menu_pinched = False
+                
             else:
                 if was_fist:
                     manipulation_end_time = time.time()
@@ -144,20 +158,33 @@ def main():
                 wrist_smoother.reset()
 
             # --- SPREAD CLEAR ---
+            is_cleared_message_showing = (cleared_display_start_time is not None) and (time.time() - cleared_display_start_time < 2.0)
             is_spread = (not is_fist) and tracker.is_hands_spread_gesture(img)
             
+            # Debounce Logic:
+            # If we see the gesture, update last valid time.
             if is_spread:
+                last_spread_valid_time = time.time()
+            
+            # If we recently saw it (within 0.2s), consider it still active.
+            # This prevents flickering from resetting the timer.
+            is_spread_active = (time.time() - last_spread_valid_time < 0.2)
+
+            # Only allow clearing if we are NOT currently showing the "CLEARED" message
+            if is_spread_active and not is_cleared_message_showing:
                 if spread_start_time is None: 
                     spread_start_time = time.time()
                 
                 # Feedback
                 elapsed = time.time() - spread_start_time
-                required_time = 1.0 # 1 second hold
+                required_time = 0.5 # Reduced to 0.5s for speed
                 
                 if elapsed < required_time:
-                    # Show Progress
-                    progress = int(elapsed / required_time * 100)
-                    cv2.putText(img, f"CLEARING {progress}%", (width//2 - 100, height//2), cv2.FONT_HERSHEY_PLAIN, 2, (0,0,255), 2)
+
+                    # Show Progress (Remaining Time)
+                    remaining = max(0.0, required_time - elapsed)
+                    # Countdown: Ceiling to make it 1.0, 0.9... until 0
+                    cv2.putText(img, f"CLEARING {remaining:.1f}s", (width//2 - 100, height//2), cv2.FONT_HERSHEY_PLAIN, 2, (0,0,255), 2)
                 else:
                     canvas.clear()
                     spread_start_time = None # Reset
@@ -254,7 +281,7 @@ def main():
                             # Standardize to World Alignment for consistent placement
                             # shape_rot = 0.0 # Old
                             shape_rot = -canvas.rot_y # Align with Camera
-                            canvas.preview_shape_bounds(shape_anchor_point, current_point, ui.active_shape_type, rotation=shape_rot, smoothness=ui.shape_smoothness)
+                            canvas.preview_shape_bounds(shape_anchor_point, current_point, ui.active_shape_type, rotation=shape_rot)
                 
                 # Handle Release (Outside is_action_pinch)
                 if not is_action_pinch and was_pinched:
@@ -262,7 +289,7 @@ def main():
                          # RELEASE Pinch
                          current_point = canvas.get_world_point_from_view(x, y, z)
                          shape_rot = -canvas.rot_y # Align with Camera
-                         canvas.add_shape_bounds(shape_anchor_point, current_point, ui.active_shape_type, rotation=shape_rot, smoothness=ui.shape_smoothness)
+                         canvas.add_shape_bounds(shape_anchor_point, current_point, ui.active_shape_type, rotation=shape_rot)
                          is_placing_shape = False
                          shape_anchor_point = None
                          canvas.current_preview_shape = None # Clear preview
