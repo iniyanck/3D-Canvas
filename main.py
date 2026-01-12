@@ -40,6 +40,9 @@ def main():
     prev_wrist_x = None
     prev_wrist_y = None
     prev_wrist_z = None # For Zoom
+    
+    manipulation_end_time = 0
+    was_fist = False
 
     spread_start_time = None
     
@@ -47,6 +50,9 @@ def main():
     shape_anchor_point = None # (x, y, z) when pinch started
     is_placing_shape = False
     was_menu_pinched = False
+    last_menu_click_time = 0
+    
+    cleared_display_start_time = None
 
     while True:
         # 1. Capture Frame
@@ -83,12 +89,15 @@ def main():
             # We smooth X, Y, and the Estimated Z (raw_z)
             x, y, z = smoother.update(ax, ay, raw_z)
             
-            # Update 3D Cursor position
-            canvas.update_cursor(x, y, z)
-            
             # --- FIST ROTATION & MOVE (Contextual) ---
             # Priority: Fist blocks everything else
             is_fist = tracker.is_fist_gesture(lm_list)
+            
+            if is_fist:
+                canvas.cursor_pos = None # Hide cursor during manipulation
+            else:
+                # Update 3D Cursor position only if not manipulating
+                canvas.update_cursor(x, y, z)
             
             if is_fist:
                 # Wrist tracking for rotation/move
@@ -102,7 +111,7 @@ def main():
                     dy = wy - prev_wrist_y
                     dz = wz - prev_wrist_z
                     
-                    if canvas.selected_indices:
+                    if canvas.selected_indices or canvas.selected_shape_indices:
                         if ui.manipulation_mode == "MOVE":
                             # Move Object
                             canvas.move_selection(dx, dy, dz)
@@ -124,35 +133,103 @@ def main():
                 is_action_pinch = False
                 is_menu_pinch = False # Also block menu
                 
+                was_fist = True
+                
             else:
+                if was_fist:
+                    manipulation_end_time = time.time()
+                    was_fist = False
+
                 prev_wrist_x = None
                 wrist_smoother.reset()
 
+            # --- SPREAD CLEAR ---
+            is_spread = (not is_fist) and tracker.is_hands_spread_gesture(img)
+            
+            if is_spread:
+                if spread_start_time is None: 
+                    spread_start_time = time.time()
+                
+                # Feedback
+                elapsed = time.time() - spread_start_time
+                required_time = 1.0 # 1 second hold
+                
+                if elapsed < required_time:
+                    # Show Progress
+                    progress = int(elapsed / required_time * 100)
+                    cv2.putText(img, f"CLEARING {progress}%", (width//2 - 100, height//2), cv2.FONT_HERSHEY_PLAIN, 2, (0,0,255), 2)
+                else:
+                    canvas.clear()
+                    spread_start_time = None # Reset
+                    cleared_display_start_time = time.time()
+            else:
+                spread_start_time = None
+            
+            if cleared_display_start_time and time.time() - cleared_display_start_time < 2.0:
+                 cv2.putText(img, "CLEARED", (width//2 - 100, height//2), cv2.FONT_HERSHEY_PLAIN, 3, (0,0,255), 3)
+            elif cleared_display_start_time:
+                 cleared_display_start_time = None
+                
             # --- MENU INTERACTION (Pinky + Thumb) ---
             # Only if NO fist
             if not is_fist:
-                # Fix Flickering: Only trigger on "Click" (Transition from False -> True)
-                if is_menu_pinch and not was_menu_pinched:
-                    # Click Event
-                    tool_id = ui.check_click(mx, my)
-                    
-                    if tool_id:
-                         # State changes handled in ui.check_click or here
+                
+                # Determine if we should process UI input
+                # 1. Clicks (Button taps) -> Trigger on transition to True
+                # 2. Dragging (Slider/Picker) -> Trigger continuously while True if in valid area
+                
+                process_ui = False
+                
+                if is_menu_pinch:
+                     # Check if we are interacting with a slider (Submenu active and pointer in submenu region)
+                     if ui.active_submenu:
+                         sub_x = ui.x + ui.w + 20 # Approximate start of submenu
+                         if mx > sub_x:
+                             process_ui = True # Allow continuous
+                     
+                     # Check for standard click (transition)
+                     if not was_menu_pinched:
+                         # Debounce: prevent spam clicks (flicker)
+                         if time.time() - last_menu_click_time > 0.35:
+                             process_ui = True
+                             last_menu_click_time = time.time()
+                
+                if process_ui:
+                     prev_tool = ui.active_tool
+                     tool_id = ui.check_click(mx, my)
+                     
+                     if tool_id:
+                         # Clear selection if tool changed
+                         if ui.active_tool != prev_tool:
+                             canvas.clear_selection()
+
+                         # Handle "Global" commands that affect canvas state directly
                          if tool_id == "UNDO":
                              canvas.undo()
-                             ui.active_tool = "BRUSH" 
                          elif tool_id == "REDO":
                              canvas.redo()
-                             ui.active_tool = "BRUSH"
+                         # UPDATE_SETTINGS and others are handled inside UI state
             
                 was_menu_pinched = is_menu_pinch
                 
                 # --- ACTION INTERACTION (Index + Thumb) ---
-                if is_action_pinch:
+                # Add Cooldown check: Don't allow pinch immediately after manipulation (0.5s)
+                if is_action_pinch and (time.time() - manipulation_end_time > 0.5):
                     active_tool = ui.active_tool
                     
+                    # Sync Settings to Canvas
+                    if "BRUSH" in active_tool or "ERASER" in active_tool:
+                        canvas.set_color(ui.brush_color)
+                        canvas.set_thickness(ui.brush_thickness)
+                    elif "SHAPES" in active_tool or active_tool.startswith("SHAPE_"):
+                        canvas.set_color(ui.shape_color)
+                        canvas.current_thickness = 1 # Reset or ignore for shapes
+                    
                     if active_tool == "BRUSH":
-                        drawing_now = True
+                        # Only draw if NOTHING is selected. 
+                        # If something is selected, user likely wants to manipulate it.
+                        if not canvas.selected_indices and not canvas.selected_shape_indices:
+                            drawing_now = True
                         
                     elif active_tool == "ERASER":
                         # Erase at current pointer
@@ -174,47 +251,33 @@ def main():
                         # HOLD Pinch (Dragging)
                         if is_placing_shape and shape_anchor_point is not None:
                             current_point = canvas.get_world_point_from_view(x, y, z)
-                            canvas.preview_shape_bounds(shape_anchor_point, current_point, ui.active_shape_type)
+                            # Standardize to World Alignment for consistent placement
+                            # shape_rot = 0.0 # Old
+                            shape_rot = -canvas.rot_y # Align with Camera
+                            canvas.preview_shape_bounds(shape_anchor_point, current_point, ui.active_shape_type, rotation=shape_rot, smoothness=ui.shape_smoothness)
                 
                 # Handle Release (Outside is_action_pinch)
                 if not is_action_pinch and was_pinched:
                      if is_placing_shape and shape_anchor_point is not None:
                          # RELEASE Pinch
                          current_point = canvas.get_world_point_from_view(x, y, z)
-                         canvas.add_shape_bounds(shape_anchor_point, current_point, ui.active_shape_type)
+                         shape_rot = -canvas.rot_y # Align with Camera
+                         canvas.add_shape_bounds(shape_anchor_point, current_point, ui.active_shape_type, rotation=shape_rot, smoothness=ui.shape_smoothness)
                          is_placing_shape = False
                          shape_anchor_point = None
                          canvas.current_preview_shape = None # Clear preview
                             
                 was_pinched = is_action_pinch
 
-
-
-            # --- SPREAD CLEAR ---
-            if not is_fist and tracker.is_hands_spread_gesture(img):
-                if spread_start_time is None: mean_val = 0 # Dummy
-                if spread_start_time is None: spread_start_time = time.time()
-                if time.time() - spread_start_time > 1.0:
-                    canvas.clear()
-                    cv2.putText(img, "CLEARED", (width//2 - 100, height//2), cv2.FONT_HERSHEY_PLAIN, 3, (0,0,255), 3)
-            else:
-                spread_start_time = None
+            # --- SPREAD CLEAR (Backup/Duplicate check removed to prevent conflicts) ---
+            # The logic is already handled in lines 135-150.
+            pass
                 
             # --- VISUALS ---
             # Draw Action Pointer
             color = (0,255,0) if is_action_pinch else (0,0,255)
             
-            # Visualize Depth: Scale Z (-2 to +2 rough) to Radius.
-            # User wants: "growing/shrinking dot in the camera as well"
-            # We use z (which is filtered estimated_z, +2 close, -2 far).
-            # Close (+2) -> Big Radius.
-            # Far (-2) -> Small Radius.
-            # Map [-2, 2] -> [5, 30]?
-            
-            # (z + 2) => 0..4
-            # * 5 => 0..20
-            # + 5 => 5..25
-            
+            # Visualize Depth
             radius = int(5 + (z + 2.0) * 8)
             radius = max(4, min(40, radius))
             
