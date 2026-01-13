@@ -43,7 +43,7 @@ class Canvas3D:
         pygame.display.set_caption("3D Gesture Canvas")
 
         # Basic OpenGL Setup
-        gluPerspective(45, (self.width / self.height), 0.1, 50.0)
+        gluPerspective(45, (self.width / self.height), 0.1, 2000.0)
         glTranslatef(0.0, 0.0, self.camera_z) 
         
         # Lighting Setup
@@ -118,7 +118,7 @@ class Canvas3D:
         aspect = self.width / self.height
         tan_half_fov = math.tan(math.radians(fov / 2))
         
-        DRAWING_DIST = -self.camera_z 
+        DRAWING_DIST = 3.0 # Fixed interaction distance
         depth = DRAWING_DIST - z_relative * 1.0 
         depth = max(0.5, depth)
         
@@ -649,7 +649,7 @@ class Canvas3D:
         self.target_x += pan_vec[0]
         self.target_y += pan_vec[1]
         self.target_z += pan_vec[2]
-        self.camera_z = max(-20.0, min(-0.5, self.camera_z - dz * scale_z))
+        self.camera_z = max(-500.0, min(-0.5, self.camera_z - dz * scale_z))
 
     def get_camera_position_world(self):
         # Cam at (0,0,0) in View Space
@@ -931,7 +931,7 @@ class Canvas3D:
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glLoadIdentity()
         
-        gluPerspective(45, (self.width / self.height), 0.1, 50.0)
+        gluPerspective(45, (self.width / self.height), 0.1, 2000.0)
         glTranslatef(0, 0, self.camera_z)
         glRotatef(self.rot_x, 1, 0, 0)
         glRotatef(self.rot_y, 0, 1, 0)
