@@ -57,6 +57,15 @@ def main():
     cleared_display_start_time = None
 
     
+    cleared_display_start_time = None
+    
+    
+    # New State Variables
+    selection_anchor_point = None
+    undo_hold_start = 0
+    last_undo_trigger = 0
+    INTERACTION_COOLDOWN = 0.1
+
     while True:
         # 1. Capture Frame
 
@@ -96,7 +105,9 @@ def main():
             
             # --- FIST ROTATION & MOVE (Contextual) ---
             # Priority: Fist blocks everything else
-            is_fist = tracker.is_fist_gesture(lm_list)
+            # Cooldown check for rotation start
+            can_manipulate = (time.time() - manipulation_end_time > INTERACTION_COOLDOWN)
+            is_fist = tracker.is_fist_gesture(lm_list) and can_manipulate
             
             if is_fist:
                 canvas.cursor_pos = None # Hide cursor during manipulation
@@ -142,7 +153,9 @@ def main():
                 
                 # Cancel Shape Placement & Reset States to prevent overlap/glitches
                 is_placing_shape = False
+                is_placing_shape = False
                 shape_anchor_point = None
+                selection_anchor_point = None
                 canvas.current_preview_shape = None
                 
                 # Reset touch history so we don't trigger "click on release" after rotation ends
@@ -217,12 +230,25 @@ def main():
                      # Check for standard click (transition)
                      if not was_menu_pinched:
                          # Debounce: prevent spam clicks (flicker)
-                         if time.time() - last_menu_click_time > 0.35:
+                         if time.time() - last_menu_click_time > INTERACTION_COOLDOWN:
                              process_ui = True
                              last_menu_click_time = time.time()
+                     
+                     # Check for HOLD (Auto-Repeat for Undo/Redo)
+                     elif was_menu_pinched: # Holding
+                         if ui.active_tool in ["UNDO", "REDO"]:
+                              # Check if held long enough
+                              hold_duration = time.time() - last_menu_click_time
+                              if hold_duration > 0.4: # Initial delay
+                                  if time.time() - last_undo_trigger > 0.2: # Repeat rate
+                                      process_ui = True
+                                      last_undo_trigger = time.time()
                 
                 if process_ui:
                      prev_tool = ui.active_tool
+                     # If holding, we don't check_click again if we already know it's undo/redo?
+                     # check_click returns the tool under internal pointer mx,my.
+                     # We should re-verify we are still over the button.
                      tool_id = ui.check_click(mx, my)
                      
                      if tool_id:
@@ -260,13 +286,30 @@ def main():
                         
                     elif active_tool == "ERASER":
                         # Erase at current pointer
-                        canvas.erase_at(x, y, radius=30)
-                        cv2.circle(img, (int(x), int(y)), 30, (255, 255, 0), 2)
+                        rad = int(ui.eraser_thickness)
+                        canvas.erase_at(x, y, radius=rad)
+                        cv2.circle(img, (int(x), int(y)), rad, (255, 255, 0), 2)
                         
                     elif active_tool == "SELECT":
                         # Toggle selection
-                        if not was_pinched: # Trigger once on start of pinch
-                            canvas.select_at(x, y)
+                        if ui.select_mode == "SINGLE":
+                            if not was_pinched: # Trigger once on start of pinch
+                                canvas.select_at(x, y)
+                        elif ui.select_mode == "BOX":
+                            if not was_pinched:
+                                # Start 3D Box Selection
+                                selection_anchor_point = canvas.get_world_point_from_view(x, y, z)
+                            
+                            if selection_anchor_point:
+                                current_point = canvas.get_world_point_from_view(x, y, z)
+                                # Preview Selection Box (Ghost)
+                                canvas.preview_shape_bounds(selection_anchor_point, current_point, "SELECTION_BOX", rotation=-canvas.rot_y)
+                                # Dynamic Selection: Select as we drag (Replace mode)
+                                canvas.select_in_volume(selection_anchor_point, current_point, add_to_selection=False)
+                        
+                        # Debug Text for Selection Mode
+                        if ui.select_mode == "BOX":
+                             cv2.putText(img, "BOX SELECTION", (width//2 - 100, 50), cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), 2)
                     
                     elif active_tool == "SHAPES":
                         # Drag to Create Logic
@@ -293,6 +336,13 @@ def main():
                          is_placing_shape = False
                          shape_anchor_point = None
                          canvas.current_preview_shape = None # Clear preview
+
+                     if selection_anchor_point is not None:
+                         # RELEASE Box Select
+                         current_point = canvas.get_world_point_from_view(x, y, z)
+                         canvas.select_in_volume(selection_anchor_point, current_point)
+                         selection_anchor_point = None
+                         canvas.current_preview_shape = None
                             
                 was_pinched = is_action_pinch
 

@@ -25,6 +25,12 @@ class UIOverlay:
 
         self.shape_color = (255, 255, 255) # White default
         self.shape_opacity = 1.0
+
+        # Eraser Settings
+        self.eraser_thickness = 30
+
+        # Selection Settings
+        self.select_mode = "SINGLE" # "SINGLE" or "BOX"
         
         # UI Layout Constants
         self.x = 60
@@ -59,6 +65,11 @@ class UIOverlay:
                  label = f"MODE: {self.manipulation_mode}"
             elif tool == "BRUSH":
                 has_submenu = True
+            elif tool == "ERASER":
+                has_submenu = True
+            elif tool == "SELECT":
+                has_submenu = True
+                label = f"SELECT: {self.select_mode}"
             elif tool == "SHAPES":
                 has_submenu = True
                 label = f"SHAPE: {self.active_shape_type}"
@@ -175,6 +186,18 @@ class UIOverlay:
              # Color Picker
              self.shape_color = self.draw_color_picker(img, "Color", self.shape_color, sub_x, current_y)
 
+        elif self.active_submenu == "ERASER_SETTINGS":
+             self.eraser_thickness = self.draw_slider(img, "Size", self.eraser_thickness, 10, 100, sub_x, current_y)
+
+        elif self.active_submenu == "SELECT_SETTINGS":
+             modes = ["SINGLE", "BOX"]
+             for m in modes:
+                 selected = (self.select_mode == m)
+                 col = (0, 255, 0) if selected else (100, 100, 100)
+                 cv2.rectangle(img, (sub_x, current_y), (sub_x + 100, current_y + 30), col, -1)
+                 cv2.putText(img, m, (sub_x + 10, current_y + 20), font, 1, (255, 255, 255), 1)
+                 current_y += 40
+
     def draw_slider(self, img, label, value, min_val, max_val, x, y):
         w = 200
         h = 20
@@ -190,7 +213,7 @@ class UIOverlay:
 
     def draw_color_picker(self, img, label, current_color, x, y):
         colors = [
-            (0, 0, 255), (0, 255, 0), (255, 0, 0),
+            (255, 0, 0), (0, 255, 0), (0, 0, 255),
             (0, 255, 255), (255, 255, 0), (255, 0, 255),
             (255, 255, 255), (128, 128, 128)
         ]
@@ -203,12 +226,21 @@ class UIOverlay:
             c = i % cols
             bx = x + c * (size + 5)
             by = y + r * (size + 5)
-            cv2.rectangle(img, (bx, by), (bx+size, by+size), col, -1)
+            
+            # Draw in BGR
+            draw_col = (col[2], col[1], col[0])
+            cv2.rectangle(img, (bx, by), (bx+size, by+size), draw_col, -1)
+            
             if col == current_color:
                 cv2.rectangle(img, (bx, by), (bx+size, by+size), (255, 255, 255), 2)
                 
-        # Preview Box
-        cv2.rectangle(img, (x + 160, y), (x + 200, y + 40), current_color, -1)
+        # Preview Box BGR
+        if len(current_color) >= 3:
+             preview = (current_color[2], current_color[1], current_color[0])
+        else:
+             preview = current_color
+             
+        cv2.rectangle(img, (x + 160, y), (x + 200, y + 40), preview, -1)
         cv2.rectangle(img, (x + 160, y), (x + 200, y + 40), (255, 255, 255), 1)
         return current_color
 
@@ -231,7 +263,7 @@ class UIOverlay:
                      # Color
                      size = 30
                      cols = 4
-                     colors = [(0,0,255),(0,255,0),(255,0,0),(0,255,255),(255,255,0),(255,0,255),(255,255,255),(128,128,128)]
+                     colors = [(255,0,0),(0,255,0),(0,0,255),(0,255,255),(255,255,0),(255,0,255),(255,255,255),(128,128,128)]
                      for i, col in enumerate(colors):
                         r = i//cols; c = i%cols
                         bx = sub_x + c*(size+5); by = current_y + r*(size+5)
@@ -251,12 +283,27 @@ class UIOverlay:
                       # Color
                       size = 30
                       cols = 4
-                      colors = [(0,0,255),(0,255,0),(255,0,0),(0,255,255),(255,255,0),(255,0,255),(255,255,255),(128,128,128)]
+                      colors = [(255,0,0),(0,255,0),(0,0,255),(0,255,255),(255,255,0),(255,0,255),(255,255,255),(128,128,128)]
                       for i, col in enumerate(colors):
                         r = i//cols; c = i%cols
                         bx = sub_x + c*(size+5); by = current_y + r*(size+5)
                         if bx<=x<=bx+size and by<=y<=by+size:
                             self.shape_color = col; return "UPDATE_SETTINGS"
+
+                 elif self.active_submenu == "ERASER_SETTINGS":
+                       if current_y <= y <= current_y + 20:
+                            norm = (x - sub_x) / 200.0
+                            self.eraser_thickness = 10 + max(0, min(1, norm)) * 90
+                            return "UPDATE_SETTINGS"
+
+                 elif self.active_submenu == "SELECT_SETTINGS":
+                      modes = ["SINGLE", "BOX"]
+                      for m in modes:
+                          if sub_x <= x <= sub_x + 100 and current_y <= y <= current_y + 30:
+                              self.select_mode = m
+                              self.active_tool = "SELECT"
+                              return "SELECT_MODE_SELECTED"
+                          current_y += 40
 
         # 2. Check Main Buttons
         for btn in self.buttons:
@@ -276,6 +323,9 @@ class UIOverlay:
                     if id == "MANIPULATION_TOGGLE":
                         self.toggle_manipulation_mode()
                         return "MANIPULATION_TOGGLE"
+                    elif id in ["UNDO", "REDO"]:
+                        # Global actions don't change the active tool
+                        return id
                     else:
                         self.active_tool = id
                         # Auto-Close Submenu if switching to a different tool concept

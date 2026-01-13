@@ -354,6 +354,68 @@ class Canvas3D:
             self.selected_indices = []
             self.selected_shape_indices = []
 
+    def select_in_volume(self, p1, p2, add_to_selection=False):
+        # Create AABB from p1, p2
+        center = (np.array(p1) + np.array(p2)) / 2.0
+        world_diag = np.array(p2) - np.array(p1)
+        size = np.abs(world_diag)
+        
+        # Simple AABB logic for now (Axial Only):
+        min_pt = center - size / 2.0
+        max_pt = center + size / 2.0
+        
+        if not add_to_selection:
+            self.selected_indices = []
+            self.selected_shape_indices = []
+        
+        # 1. Select Strokes
+        for i, stroke_data in enumerate(self.lines):
+            stroke = stroke_data["points"]
+            # Check if any point is in AABB
+            found = False
+            for p in stroke[::2]:
+                # Check point in AABB
+                if np.all(p >= min_pt) and np.all(p <= max_pt):
+                    if i not in self.selected_indices:
+                        self.selected_indices.append(i)
+                    found = True
+                    break 
+            
+        # 2. Select Shapes
+        for i, shape in enumerate(self.shapes):
+            shape_center = shape["center"]
+            if np.all(shape_center >= min_pt) and np.all(shape_center <= max_pt):
+                if i not in self.selected_shape_indices:
+                    self.selected_shape_indices.append(i)
+
+    def select_in_rect(self, start_x, start_y, end_x, end_y):
+        x_min = min(start_x, end_x)
+        x_max = max(start_x, end_x)
+        y_min = min(start_y, end_y)
+        y_max = max(start_y, end_y)
+        
+        # 1. Select Strokes
+        for i, stroke_data in enumerate(self.lines):
+            stroke = stroke_data["points"]
+            # Check if any point is in the box
+            # To speed up, check every 5th point
+            found = False
+            for p in stroke[::2]:
+                px, py = self.project_point(p)
+                if px is not None:
+                    if x_min <= px <= x_max and y_min <= py <= y_max:
+                        self.selected_indices.append(i)
+                        found = True
+                        break 
+            
+        # 2. Select Shapes
+        for i, shape in enumerate(self.shapes):
+            center = shape["center"]
+            cx, cy = self.project_point(center)
+            if cx is not None:
+                if x_min <= cx <= x_max and y_min <= cy <= y_max:
+                    self.selected_shape_indices.append(i)
+
     def erase_at(self, screen_x, screen_y, radius=30):
         self.save_state()
         eraser_pos = np.array([screen_x, screen_y])
@@ -558,7 +620,7 @@ class Canvas3D:
         # World Move = Inv(R_view) * [dx, dy, 0]
         
         # We use -dy because Screen Y is Down, World Y is Up
-        move_view = np.array([dx, -dy, -dz * 50.0]) * scale_factor
+        move_view = np.array([dx, -dy, dz * -150.0]) * scale_factor
         
         r_inv = r_view.T
         move_world = np.dot(r_inv, move_view)
@@ -789,7 +851,10 @@ class Canvas3D:
              self.draw_wireframe_cube_local((1,1,1))
              r,g,b = color if len(color)==3 else (1,1,1)
              rgba = (r, g, b, 0.4) 
-             if type == "CUBE":
+             if type == "SELECTION_BOX":
+                 # Green Wireframe only
+                 self.draw_wireframe_cube_local((0, 1, 0))
+             elif type == "CUBE":
                  self.draw_solid_cube_local(rgba)
              elif type == "PYRAMID":
                  self.draw_solid_pyramid_local(rgba)
