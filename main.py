@@ -272,10 +272,12 @@ def main():
                     
                     # Sync Settings to Canvas
                     if "BRUSH" in active_tool or "ERASER" in active_tool:
-                        canvas.set_color(ui.brush_color)
+                        r, g, b = ui.brush_color
+                        canvas.set_color((r, g, b, ui.brush_opacity))
                         canvas.set_thickness(ui.brush_thickness)
                     elif "SHAPES" in active_tool or active_tool.startswith("SHAPE_"):
-                        canvas.set_color(ui.shape_color)
+                        r, g, b = ui.shape_color
+                        canvas.set_color((r, g, b, ui.shape_opacity))
                         canvas.current_thickness = 1 # Reset or ignore for shapes
                     
                     if active_tool == "BRUSH":

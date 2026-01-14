@@ -68,9 +68,10 @@ class Canvas3D:
         glLightf(GL_LIGHT1, GL_QUADRATIC_ATTENUATION, 0.02)
 
     def set_color(self, rgb_255):
-        """Set current RGB color (input tuple 0-255)"""
-        # Ensure we have a tuple of 3
-        if len(rgb_255) >= 3:
+        """Set current RGB/RGBA color (input tuple 0-255)"""
+        if len(rgb_255) == 4:
+             self.current_color = (rgb_255[0]/255.0, rgb_255[1]/255.0, rgb_255[2]/255.0, rgb_255[3])
+        elif len(rgb_255) >= 3:
             self.current_color = (rgb_255[0]/255.0, rgb_255[1]/255.0, rgb_255[2]/255.0)
 
     def set_thickness(self, val):
@@ -1061,12 +1062,18 @@ class Canvas3D:
         # 4. Current Stroke
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        r, g, b = self.current_color
-        glColor4f(r, g, b, 0.5)
+        
+        if len(self.current_color) == 4:
+            r, g, b, a = self.current_color
+        else:
+            r, g, b = self.current_color
+            a = 1.0
+
+        glColor4f(r, g, b, a)
         curr_radius = 0.01 + (self.current_thickness * 0.005)
         if len(self.current_stroke) > 1:
             for i in range(len(self.current_stroke) - 1):
-                 self.draw_cylinder(self.current_stroke[i], self.current_stroke[i+1], curr_radius, (r,g,b))
+                 self.draw_cylinder(self.current_stroke[i], self.current_stroke[i+1], curr_radius, (r,g,b,a))
         if self.current_stroke:
              p = self.current_stroke[-1]
              glPushMatrix()

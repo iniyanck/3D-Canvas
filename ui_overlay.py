@@ -168,6 +168,13 @@ class UIOverlay:
             self.brush_thickness = self.draw_slider(img, "Thickness", self.brush_thickness, 1, 20, sub_x, current_y)
             current_y += 60
             
+            # Opacity Slider
+            # Convert 0.0-1.0 to 0-100 for slider
+            op_val = self.brush_opacity * 100
+            op_val = self.draw_slider(img, "Opacity", op_val, 0, 100, sub_x, current_y)
+            self.brush_opacity = op_val / 100.0
+            current_y += 60
+            
             # Color Picker
             self.brush_color = self.draw_color_picker(img, "Color", self.brush_color, sub_x, current_y)
             
@@ -181,7 +188,12 @@ class UIOverlay:
                  cv2.putText(img, t, (sub_x + 10, current_y + 20), font, 1, (255, 255, 255), 1)
                  current_y += 40
              
-
+             # Opacity Slider
+             current_y += 20
+             op_val = self.shape_opacity * 100
+             op_val = self.draw_slider(img, "Opacity", op_val, 0, 100, sub_x, current_y)
+             self.shape_opacity = op_val / 100.0
+             current_y += 60
              
              # Color Picker
              self.shape_color = self.draw_color_picker(img, "Color", self.shape_color, sub_x, current_y)
@@ -206,7 +218,13 @@ class UIOverlay:
         # Bar
         cv2.rectangle(img, (x, y), (x + w, y + h), (100, 100, 100), -1)
         # Handle
-        norm = (value - min_val) / (max_val - min_val)
+        
+        # Clamp value just in case
+        value = max(min_val, min(max_val, value))
+        
+        if max_val - min_val == 0: norm = 0
+        else: norm = (value - min_val) / (max_val - min_val)
+        
         hx = int(x + norm * w)
         cv2.circle(img, (hx, y + h//2), 10, (255, 255, 255), -1)
         return value
@@ -260,6 +278,14 @@ class UIOverlay:
                          self.brush_thickness = 1 + max(0, min(1, norm)) * 19
                          return "UPDATE_SETTINGS"
                      current_y += 60
+                     
+                     # Opacity
+                     if current_y <= y <= current_y + 20:
+                         norm = (x - sub_x) / 200.0
+                         self.brush_opacity = max(0.0, min(1.0, norm))
+                         return "UPDATE_SETTINGS"
+                     current_y += 60
+                     
                      # Color
                      size = 30
                      cols = 4
@@ -279,6 +305,14 @@ class UIOverlay:
                               # Note: We DON'T close submenu here, user might want to set color too
                               return "SHAPE_TYPE_SELECTED"
                           current_y += 40
+
+                      # Opacity
+                      current_y += 20
+                      if current_y <= y <= current_y + 20: 
+                         norm = (x - sub_x) / 200.0
+                         self.shape_opacity = max(0.0, min(1.0, norm))
+                         return "UPDATE_SETTINGS"
+                      current_y += 60
 
                       # Color
                       size = 30
