@@ -872,11 +872,18 @@ class Canvas3D:
                  draw_color = color
             
             # 1. Draw Solid
-            # Enable Blending if selected (transparency)
-            if is_selected:
+            # Determine if we need blending
+            # Enable if selected OR if base color has transparency
+            r, g, b = draw_color[:3]
+            a = draw_color[3] if len(draw_color) == 4 else 1.0
+            
+            is_transparent = (a < 0.99) or is_selected
+            
+            if is_transparent:
                 glEnable(GL_BLEND)
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                glDepthMask(GL_FALSE)
+                if is_selected:
+                    glDepthMask(GL_FALSE)
 
             if type == "CUBE":
                  self.draw_solid_cube_local(draw_color)
@@ -887,8 +894,9 @@ class Canvas3D:
                  else: glColor3f(*draw_color)
                  gluSphere(self.quadric, 0.5, segments, segments)
             
-            if is_selected:
-                glDepthMask(GL_TRUE)
+            if is_transparent:
+                if is_selected:
+                    glDepthMask(GL_TRUE)
                 glDisable(GL_BLEND)
                 
                 # 2. Draw Moving Dotted Outline
@@ -975,17 +983,22 @@ class Canvas3D:
             is_selected = (i in self.selected_indices)
             
             if is_selected:
+                  color = (r, g, b, 0.7) # Transparent
+            else:
+                  color = (r, g, b, a)
+
+            # Enable blending if transparent
+            needs_blend = is_selected or (a < 0.99)
+            
+            if needs_blend:
                  glEnable(GL_BLEND)
                  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                 color = (r, g, b, 0.7) # Transparent
-            else:
-                 color = (r, g, b, a)
 
             if len(stroke) > 1:
                 for j in range(len(stroke) - 1):
                     self.draw_cylinder(stroke[j], stroke[j+1], radius, color)
             
-            if is_selected:
+            if needs_blend:
                  glDisable(GL_BLEND)
                  
                  # Draw View-Dependent Silhouette Lines
