@@ -46,7 +46,13 @@ class UIOverlay:
     def setup_ui(self):
         # Tools that have submenus
         self.main_tools = ["BRUSH", "ERASER", "SELECT", "SHAPES", "UNDO", "REDO", "MANIPULATION_TOGGLE"]
-        self.shape_tools = ["CUBE", "SPHERE", "PYRAMID", "BACK"] # Legacy list
+        
+        # Shape Library: List of dicts {"id": "CUBE", "type": "PRIMITIVE"|"MESH", "vertices": [] (optional)}
+        self.shape_library = [
+            {"id": "CUBE", "type": "PRIMITIVE"},
+            {"id": "SPHERE", "type": "PRIMITIVE"},
+            {"id": "PYRAMID", "type": "PRIMITIVE"}
+        ]
         
         self.update_buttons()
         
@@ -150,6 +156,12 @@ class UIOverlay:
         font_scale = 1
         thickness = 1
         (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, thickness)
+        
+        # Auto-scale text to fit
+        if text_w > w - 10:
+            font_scale = font_scale * ((w - 10) / text_w)
+            (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, thickness)
+            
         tx = x + (w - text_w) // 2
         ty = y + (h + text_h) // 2
         cv2.putText(img, label, (tx, ty), font, font_scale, (0, 0, 0), thickness)
@@ -179,17 +191,32 @@ class UIOverlay:
             self.brush_color = self.draw_color_picker(img, "Color", self.brush_color, sub_x, current_y)
             
         elif self.active_submenu == "SHAPES_SETTINGS":
-             # Shape Types
-             types = ["CUBE", "PYRAMID", "SPHERE"]
-             for t in types:
-                 selected = (self.active_shape_type == t)
-                 col = (0, 255, 0) if selected else (100, 100, 100)
-                 cv2.rectangle(img, (sub_x, current_y), (sub_x + 100, current_y + 30), col, -1)
-                 cv2.putText(img, t, (sub_x + 10, current_y + 20), font, 1, (255, 255, 255), 1)
-                 current_y += 40
+             # Shape Grid
+             cols = 3
+             size = 60
+             gap = 10
+             
+             # 1. "IMPORT" Button (First item?) or Last? Let's make it distinct
+             # "Import New..." Button
+             cv2.rectangle(img, (sub_x, current_y), (sub_x + 150, current_y + 30), (80, 80, 80), -1)
+             cv2.putText(img, "IMPORT NEW...", (sub_x + 10, current_y + 20), font, 1, (255, 255, 255), 1)
+             current_y += 40
+             
+             for i, shape_dict in enumerate(self.shape_library):
+                 r = i // cols
+                 c = i % cols
+                 
+                 bx = sub_x + c * (size + gap)
+                 by = current_y + r * (size + gap)
+                 
+                 is_active = (self.active_shape_type == shape_dict["id"])
+                 self.draw_shape_preview(img, shape_dict, bx, by, size, is_active)
+                 
+             # Advance Y for sliders below grid
+             rows = (len(self.shape_library) + cols - 1) // cols
+             current_y += rows * (size + gap) + 10
              
              # Opacity Slider
-             current_y += 20
              op_val = self.shape_opacity * 100
              op_val = self.draw_slider(img, "Opacity", op_val, 0, 100, sub_x, current_y)
              self.shape_opacity = op_val / 100.0
@@ -229,6 +256,117 @@ class UIOverlay:
         cv2.circle(img, (hx, y + h//2), 10, (255, 255, 255), -1)
         return value
 
+    def add_custom_shape(self, name, vertices=None, faces=None, color=(255,255,255)):
+        self.shape_library.append({
+            "id": name,
+            "type": "MESH",
+            "vertices": vertices,
+            "faces": faces,
+            "color": color
+        })
+
+    def draw_shape_preview(self, img, shape_dict, x, y, size, active):
+        # Background
+        color = (60, 60, 60)
+        if active: color = (100, 100, 100)
+        cv2.rectangle(img, (x, y), (x+size, y+size), color, -1)
+        if active:
+            cv2.rectangle(img, (x, y), (x+size, y+size), (0, 255, 0), 2)
+            
+        center = (x + size//2, y + size//2)
+        scale = size * 0.35
+        
+        type = shape_dict["type"]
+        id = shape_dict["id"]
+        
+        # Use Shape Color if available
+        base_color = shape_dict.get("color", (200, 200, 200)) # Default Grey
+        # Ensure it's 0-255 tuple
+        if isinstance(base_color, tuple) and len(base_color) >= 3:
+             # Convert 0-1 float to 0-255 if needed
+             if base_color[0] <= 1.0 and base_color[1] <= 1.0 and base_color[2] <= 1.0:
+                 current_col = (int(base_color[0]*255), int(base_color[1]*255), int(base_color[2]*255))
+             else:
+                 current_col = (int(base_color[0]), int(base_color[1]), int(base_color[2]))
+                 
+             # OpenCV uses BGR
+             draw_col = (current_col[2], current_col[1], current_col[0])
+        else:
+             draw_col = (200, 200, 200)
+
+        if active: 
+             # Highlight? Maybe just brighter version?
+             pass
+        
+        if id == "CUBE":
+            # Draw rough Cube
+            pts = [
+                (-1,-1), (1,-1), (1,1), (-1,1), # Front
+                (-0.5,-1.5), (1.5,-1.5), (1.5,0.5), (-0.5,0.5) # Back
+            ]
+            scr_pts = []
+            for px, py in pts:
+                 scr_pts.append((int(center[0] + px*scale*0.6), int(center[1] + py*scale*0.6)))
+            
+            # Front Loop
+            for i in range(4): 
+                cv2.line(img, scr_pts[i], scr_pts[(i+1)%4], draw_col, 1)
+            # Back Loop
+            for i in range(4, 8):
+                cv2.line(img, scr_pts[i], scr_pts[4 + (i+1)%4], draw_col, 1)
+            # Connectors
+            for i in range(4):
+                cv2.line(img, scr_pts[i], scr_pts[i+4], draw_col, 1)
+                
+        elif id == "PYRAMID":
+            pts = [(-1, 0.5), (1, 0.5), (0, 0.5 - 0.5), (0, -1)] # Base L, Base R, Back, Tip
+            # 2D projection is tricky without 3D math, let's fake it
+            # Triangle + side
+            tip = (center[0], int(center[1] - scale))
+            bl = (int(center[0] - scale), int(center[1] + scale*0.5))
+            br = (int(center[0] + scale), int(center[1] + scale*0.5))
+            bm = (center[0] + 10, int(center[1] + scale*0.5 - 15))
+            
+            cv2.line(img, tip, bl, draw_col, 1)
+            cv2.line(img, tip, br, draw_col, 1)
+            cv2.line(img, bl, br, draw_col, 1)
+            
+        elif id == "SPHERE":
+            cv2.circle(img, center, int(scale), draw_col, 1)
+            cv2.ellipse(img, center, (int(scale), int(scale*0.3)), 0, 0, 360, (150,150,150), 1)
+            cv2.ellipse(img, center, (int(scale*0.3), int(scale)), 0, 0, 360, (150,150,150), 1)
+            
+        elif type == "MESH":
+            # Render Mesh Preview
+            # We need vertices. If not available, show "OBJ" text
+            verts = shape_dict.get("vertices")
+            if verts and len(verts) > 0:
+                # Project some vertices
+                # Simple Ortho: X, Y -> Screen X, Y
+                # Vertices are normalized to unit cube (-0.5 to 0.5)
+                # Just take every Nth vertex to be fast
+                step = max(1, len(verts) // 50)
+                
+                # We want to rotate it slightly to show depth?
+                # Simple rotation: x' = x*c - z*s, z' = x*s + z*c
+                angle = 0.5
+                c, s = 0.866, 0.5 # 30 deg
+                
+                for v in verts[::step]:
+                    # v is [x, y, z]
+                    vx, vy, vz = v
+                    
+                    # Rotate Y
+                    rx = vx * c - vz * s
+                    ry = vy
+                    
+                    sx = int(center[0] + rx * scale * 2.5) # Scale up a bit
+                    sy = int(center[1] - ry * scale * 2.5) # Invert Y
+                    
+                    cv2.circle(img, (sx, sy), 1, draw_col, -1)
+            else:
+                cv2.putText(img, "OBJ", (x+10, center[1]), cv2.FONT_HERSHEY_PLAIN, 1, draw_col, 1)
+                
     def draw_color_picker(self, img, label, current_color, x, y):
         colors = [
             (255, 0, 0), (0, 255, 0), (0, 0, 255),
@@ -297,17 +435,35 @@ class UIOverlay:
                             self.brush_color = col; return "UPDATE_SETTINGS"
                             
                  elif self.active_submenu == "SHAPES_SETTINGS":
-                      types = ["CUBE", "PYRAMID", "SPHERE"]
-                      for t in types:
-                          if sub_x <= x <= sub_x + 100 and current_y <= y <= current_y + 30:
-                              self.active_shape_type = t
-                              self.active_tool = "SHAPES" 
-                              # Note: We DON'T close submenu here, user might want to set color too
+                      # 1. Check IMPORT Button
+                      if sub_x <= x <= sub_x + 150 and current_y <= y <= current_y + 30:
+                          return "IMPORT_NEW"
+                      current_y += 40
+                      
+                      # 2. Check Shape Grid
+                      cols = 3
+                      size = 60
+                      gap = 10
+                      rows = (len(self.shape_library) + cols - 1) // cols
+                      
+                      # Approximate grid area
+                      grid_h = rows * (size + gap)
+                      if sub_x <= x <= sub_x + cols*(size+gap) and current_y <= y <= current_y + grid_h:
+                          # Find which one
+                          rel_x = x - sub_x
+                          rel_y = y - current_y
+                          c = int(rel_x // (size + gap))
+                          r = int(rel_y // (size + gap))
+                          idx = r * cols + c
+                          
+                          if 0 <= idx < len(self.shape_library):
+                              self.active_shape_type = self.shape_library[idx]["id"]
+                              self.active_tool = "SHAPES"
                               return "SHAPE_TYPE_SELECTED"
-                          current_y += 40
+                      
+                      current_y += grid_h + 10
 
                       # Opacity
-                      current_y += 20
                       if current_y <= y <= current_y + 20: 
                          norm = (x - sub_x) / 200.0
                          self.shape_opacity = max(0.0, min(1.0, norm))
@@ -357,7 +513,7 @@ class UIOverlay:
                     if id == "MANIPULATION_TOGGLE":
                         self.toggle_manipulation_mode()
                         return "MANIPULATION_TOGGLE"
-                    elif id in ["UNDO", "REDO"]:
+                    elif id in ["UNDO", "REDO", "IMPORT"]:
                         # Global actions don't change the active tool
                         return id
                     else:

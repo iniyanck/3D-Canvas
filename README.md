@@ -10,6 +10,7 @@ A Python-based 3D drawing application that uses computer vision for hand gesture
 -   **Gesture Controls**: Intuitive pinch and fist gestures for interaction.
 -   **Manipulation**: Move and rotate objects or the camera view naturally.
 -   **Selection Tools**: Box selection and single-item selection modes.
+-   **Import 3D Models**: Import OBJ files via the "Shapes" > "Import New..." menu.
 -   **Undo/Redo**: Fast and responsive history controls.
 
 ## Installation

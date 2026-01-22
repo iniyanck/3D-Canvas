@@ -261,7 +261,36 @@ def main():
                              canvas.undo()
                          elif tool_id == "REDO":
                              canvas.redo()
-                         # UPDATE_SETTINGS and others are handled inside UI state
+                         # UPDATE_SETTINGS is handled inside UI state
+                         elif tool_id == "IMPORT_NEW":
+                             # Trigger Import Flow from Submenu
+                             import tkinter as tk
+                             from tkinter import filedialog
+                             try:
+                                root = tk.Tk()
+                                root.withdraw()
+                                root.attributes('-topmost', True)
+                                file_path = filedialog.askopenfilename(filetypes=[("OBJ Files", "*.obj"), ("All Files", "*.*")])
+                                root.destroy()
+                                if file_path:
+                                    # Import and Register
+                                    ret = canvas.import_obj_file(file_path)
+                                    if ret:
+                                        name, mesh_data, color = ret
+                                        
+                                        # Register in Canvas for 3D Drawing
+                                        canvas.register_mesh(name, mesh_data)
+                                        
+                                        # Add to UI Library
+                                        ui.add_custom_shape(name, 
+                                                            vertices=mesh_data["vertices"], 
+                                                            faces=mesh_data["faces"], 
+                                                            color=color)
+                                        # Set as active
+                                        ui.active_shape_type = name
+                                        
+                             except Exception as e:
+                                print(f"Import Error: {e}")
             
                 was_menu_pinched = is_menu_pinch
                 

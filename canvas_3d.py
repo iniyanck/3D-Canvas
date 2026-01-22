@@ -4,6 +4,7 @@ from OpenGL.GL import *
 from OpenGL.GLU import *
 import numpy as np
 import math
+import os
 
 class Canvas3D:
     def __init__(self, width=800, height=600):
@@ -12,6 +13,7 @@ class Canvas3D:
         # self.lines will now store dicts: {"points": [(x,y,z),...], "color": (r,g,b), "thickness": t}
         self.lines = [] 
         self.shapes = [] # List of shape dicts: {type, bounds: (p1, p2), color}
+        self.mesh_library = {} # Registry for imported meshes
         self.current_stroke = []
         self.cursor_pos = None # (x, y, z) tuple for 3D cursor
         
@@ -690,6 +692,9 @@ class Canvas3D:
     
     # --- SHAPES ---
     
+    def register_mesh(self, name, mesh_data):
+        self.mesh_library[name] = mesh_data
+
     def _create_shape_dict(self, p1, p2, shape_type, rotation=0.0):
         # Convert Bounds -> Center + Size + Rotation
         # p1, p2 are world points of the drag diagonal
@@ -718,7 +723,7 @@ class Canvas3D:
         local_diag = np.dot(inv_rot, world_diag)
         size = np.abs(local_diag)
         
-        return {
+        shape_dict = {
             "type": shape_type,
             "center": center,
             "size": size,
@@ -727,6 +732,16 @@ class Canvas3D:
             "rotation_matrix": rot_mat
         }
 
+        # --- Check for Registered MESH ---
+        if shape_type in self.mesh_library:
+            shape_dict["type"] = "MESH"
+            shape_dict["mesh_data"] = self.mesh_library[shape_type]
+            # Use the mesh-defined bounds or keep user drag size?
+            # User drag size is nice because it lets them scale it.
+            # But the mesh data is normalized to unit cube (roughly).
+            
+        return shape_dict
+
     def add_shape_bounds(self, p1, p2, shape_type, rotation=0.0):
         self.save_state()
         shape = self._create_shape_dict(p1, p2, shape_type, rotation)
@@ -734,6 +749,125 @@ class Canvas3D:
 
     def preview_shape_bounds(self, p1, p2, shape_type, rotation=0.0):
         self.current_preview_shape = self._create_shape_dict(p1, p2, shape_type, rotation)
+
+    def import_obj_file(self, filepath):
+        vertices = []
+        faces = []
+        vertex_colors = [] # List of (r,g,b)
+        
+        # Colors
+        material_colors = {} # Name -> (r,g,b)
+        current_material = None
+        
+        base_dir = os.path.dirname(filepath)
+            
+        try:
+            with open(filepath, 'r') as f:
+                for line in f:
+                    if line.startswith('mtllib '):
+                         parts = line.strip().split()
+                         if len(parts) > 1:
+                             mtl_path = os.path.join(base_dir, parts[1])
+                             if os.path.exists(mtl_path):
+                                 try:
+                                     with open(mtl_path, 'r') as mf:
+                                         cur_mtl_name = None
+                                         for mline in mf:
+                                             if mline.startswith('newmtl '):
+                                                 cur_mtl_name = mline.strip().split()[1]
+                                             elif mline.startswith('Kd ') and cur_mtl_name:
+                                                 cparts = mline.strip().split()
+                                                 material_colors[cur_mtl_name] = (float(cparts[1]), float(cparts[2]), float(cparts[3]))
+                                 except: pass
+                                 
+                    elif line.startswith('v '):
+                        parts = line.strip().split()
+                        # Check for vertex colors: v x y z r g b
+                        vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
+                        if len(parts) >= 7:
+                            vertex_colors.append((float(parts[4]), float(parts[5]), float(parts[6])))
+                            
+                    elif line.startswith('usemtl '):
+                        parts = line.strip().split()
+                        if len(parts) > 1:
+                            current_material = parts[1]
+                            
+                    elif line.startswith('f '):
+                        parts = line.strip().split()
+                        face = []
+                        for p in parts[1:]:
+                            idx = int(p.split('/')[0]) - 1
+                            face.append(idx)
+                        faces.append(face)
+                        # We could store current_material with the face, but simple renderer...
+                        # Let's just grab the FIRST material color found and use it as the shape color?
+                        # Or if we have vertex colors, use those.
+        except Exception as e:
+            print(f"Failed to load OBJ: {e}")
+            return None
+            
+        print(f"Loaded {len(vertices)} vertices, {len(faces)} faces.")
+            
+        if not vertices:
+            print("No vertices found!")
+            return None
+
+        # Normalize Mesh
+        np_verts = np.array(vertices)
+        file_center = np.mean(np_verts, axis=0)
+        np_verts -= file_center
+        
+        min_v = np.min(np_verts, axis=0)
+        max_v = np.max(np_verts, axis=0)
+        size = max_v - min_v
+        max_dim = np.max(size)
+        
+        print(f"Mesh Scale: {max_dim}, Bounds: {size}")
+        
+        if max_dim > 0:
+            np_verts /= max_dim
+            
+        vertices = np_verts.tolist()
+        
+        # Calculate Normals
+        face_normals = []
+        for face in faces:
+            if len(face) >= 3:
+                v1 = np_verts[face[0]]
+                v2 = np_verts[face[1]]
+                v3 = np_verts[face[2]]
+                normal = np.cross(v2 - v1, v3 - v1)
+                norm = np.linalg.norm(normal)
+                if norm > 0: normal /= norm
+                face_normals.append(normal)
+            else:
+                face_normals.append(np.array([0,1,0]))
+        
+        # Decide Color
+        final_color = self.current_color
+        
+        # Priority 1: Material (Kd) - just pick the last one used or first?
+        # Let's pick the one from 'material_colors' if not empty
+        if material_colors:
+             # Just pick the first one for the whole object for now (Simple)
+             first_key = list(material_colors.keys())[0]
+             r,g,b = material_colors[first_key]
+             final_color = (r, g, b)
+        
+        # Priority 2: Vertex Colors (If present, we should use them in rendering)
+        # We will pass them in mesh_data
+        
+        mesh_data = {
+            "vertices": vertices,
+            "faces": faces, 
+            "normals": face_normals,
+            "vertex_colors": vertex_colors if len(vertex_colors) == len(vertices) else []
+        }
+
+        filename = os.path.basename(filepath)
+        
+        return filename, mesh_data, final_color
+
 
     def draw_wireframe_cube_bounds(self, p1, p2, color):
         pass # Not used
@@ -828,6 +962,50 @@ class Canvas3D:
         glEnd()
         glPopMatrix()
 
+    def draw_mesh_local(self, mesh_data, color):
+        if not mesh_data: return
+        
+        glPushMatrix()
+        if len(color) == 4:
+            glColor4f(*color)
+        else:
+            glColor3f(*color)
+            
+        vertices = mesh_data["vertices"]
+        faces = mesh_data["faces"]
+        normals = mesh_data["normals"]
+        vertex_colors = mesh_data.get("vertex_colors", [])
+        
+        glBegin(GL_TRIANGLES)
+        for i, face in enumerate(faces):
+            # Simple triangulation for quads/polys
+            if len(face) >= 3:
+                normal = normals[i]
+                glNormal3f(*normal)
+                
+                # Fan triangulation
+                v0_idx = face[0]
+                v0 = vertices[v0_idx]
+                
+                for j in range(1, len(face) - 1):
+                    v1_idx = face[j]
+                    v2_idx = face[j+1]
+                    v1 = vertices[v1_idx]
+                    v2 = vertices[v2_idx]
+                    
+                    if vertex_colors:
+                        # Use Vertex Colors if available
+                        glColor3f(*vertex_colors[v0_idx]); glVertex3f(*v0)
+                        glColor3f(*vertex_colors[v1_idx]); glVertex3f(*v1)
+                        glColor3f(*vertex_colors[v2_idx]); glVertex3f(*v2)
+                    else:
+                        glVertex3f(*v0)
+                        glVertex3f(*v1)
+                        glVertex3f(*v2)
+        glEnd()
+        glPopMatrix()
+
+
     def render_shape(self, shape_dict, is_ghost=False, is_selected=False):
         center = shape_dict["center"]
         size = shape_dict["size"]
@@ -862,6 +1040,8 @@ class Canvas3D:
              elif type == "SPHERE":
                   glColor4f(*rgba)
                   gluSphere(self.quadric, 0.5, segments, segments)
+             elif type == "MESH":
+                  self.draw_mesh_local(shape_dict.get("mesh_data"), rgba)
 
         else:
             # Selection Visualization: Semi-transparent + Moving Dotted Outline
@@ -893,6 +1073,8 @@ class Canvas3D:
                  if len(draw_color) == 4: glColor4f(*draw_color)
                  else: glColor3f(*draw_color)
                  gluSphere(self.quadric, 0.5, segments, segments)
+            elif type == "MESH":
+                 self.draw_mesh_local(shape_dict.get("mesh_data"), draw_color)
             
             if is_transparent:
                 if is_selected:
@@ -921,6 +1103,8 @@ class Canvas3D:
                     # Sphere wireframe is tricky with glut/glu, just draw a box or rings?
                     # Let's draw the bounding box for selection mostly
                     self.draw_wireframe_cube_local((1,1,1))
+                elif type == "MESH":
+                     self.draw_wireframe_cube_local((1,1,1)) # Bound box for now
                     
                 glPopMatrix()
                 glDisable(GL_LINE_STIPPLE)
