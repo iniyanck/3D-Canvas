@@ -51,7 +51,9 @@ class UIOverlay:
         self.shape_library = [
             {"id": "CUBE", "type": "PRIMITIVE"},
             {"id": "SPHERE", "type": "PRIMITIVE"},
-            {"id": "PYRAMID", "type": "PRIMITIVE"}
+            {"id": "PYRAMID", "type": "PRIMITIVE"},
+            {"id": "CYLINDER", "type": "PRIMITIVE"},
+            {"id": "CONE", "type": "PRIMITIVE"}
         ]
         
         self.update_buttons()
@@ -196,11 +198,9 @@ class UIOverlay:
              size = 60
              gap = 10
              
-             # 1. "IMPORT" Button (First item?) or Last? Let's make it distinct
-             # "Import New..." Button
-             cv2.rectangle(img, (sub_x, current_y), (sub_x + 150, current_y + 30), (80, 80, 80), -1)
-             cv2.putText(img, "IMPORT NEW...", (sub_x + 10, current_y + 20), font, 1, (255, 255, 255), 1)
-             current_y += 40
+             # 1. Shape Grid
+             # Removed Import Button
+             # current_y += 0
              
              for i, shape_dict in enumerate(self.shape_library):
                  r = i // cols
@@ -319,18 +319,54 @@ class UIOverlay:
                 cv2.line(img, scr_pts[i], scr_pts[i+4], draw_col, 1)
                 
         elif id == "PYRAMID":
-            pts = [(-1, 0.5), (1, 0.5), (0, 0.5 - 0.5), (0, -1)] # Base L, Base R, Back, Tip
-            # 2D projection is tricky without 3D math, let's fake it
-            # Triangle + side
+            # 3D Wireframe Pyramid
             tip = (center[0], int(center[1] - scale))
-            bl = (int(center[0] - scale), int(center[1] + scale*0.5))
-            br = (int(center[0] + scale), int(center[1] + scale*0.5))
-            bm = (center[0] + 10, int(center[1] + scale*0.5 - 15))
+            bl = (int(center[0] - scale*0.8), int(center[1] + scale*0.5))
+            br = (int(center[0] + scale*0.8), int(center[1] + scale*0.5))
+            back = (center[0], int(center[1] + scale*0.2)) # Fake depth
             
+            # Base
+            cv2.line(img, bl, br, draw_col, 1)
+            cv2.line(img, br, back, draw_col, 1)
+            cv2.line(img, back, bl, draw_col, 1)
+            # Tip connections
             cv2.line(img, tip, bl, draw_col, 1)
             cv2.line(img, tip, br, draw_col, 1)
-            cv2.line(img, bl, br, draw_col, 1)
+            cv2.line(img, tip, back, draw_col, 1)
             
+        elif id == "CYLINDER":
+            # Cylinder Preview
+            w = int(scale * 0.8)
+            h = int(scale * 1.5)
+            top_y = center[1] - h//2
+            bot_y = center[1] + h//2
+            
+            # Draw ellipse top
+            cv2.ellipse(img, (center[0], top_y), (w, int(w*0.3)), 0, 0, 360, draw_col, 1)
+            # Draw ellipse bottom
+            cv2.ellipse(img, (center[0], bot_y), (w, int(w*0.3)), 0, 0, 180, draw_col, 1) # Half visible
+            cv2.ellipse(img, (center[0], bot_y), (w, int(w*0.3)), 0, 180, 360, (100,100,100), 1) # Back hidden
+            
+            # Sides
+            cv2.line(img, (center[0]-w, top_y), (center[0]-w, bot_y), draw_col, 1)
+            cv2.line(img, (center[0]+w, top_y), (center[0]+w, bot_y), draw_col, 1)
+
+        elif id == "CONE":
+            # Cone Preview
+            w = int(scale * 0.8)
+            h = int(scale * 1.5)
+            top_y = center[1] - h//2
+            bot_y = center[1] + h//2
+            
+            # Draw ellipse bottom
+            cv2.ellipse(img, (center[0], bot_y), (w, int(w*0.3)), 0, 0, 180, draw_col, 1)
+            cv2.ellipse(img, (center[0], bot_y), (w, int(w*0.3)), 0, 180, 360, (100,100,100), 1)
+            
+            # Sides to tip
+            tip = (center[0], top_y)
+            cv2.line(img, tip, (center[0]-w, bot_y), draw_col, 1)
+            cv2.line(img, tip, (center[0]+w, bot_y), draw_col, 1)
+
         elif id == "SPHERE":
             cv2.circle(img, center, int(scale), draw_col, 1)
             cv2.ellipse(img, center, (int(scale), int(scale*0.3)), 0, 0, 360, (150,150,150), 1)
@@ -435,12 +471,7 @@ class UIOverlay:
                             self.brush_color = col; return "UPDATE_SETTINGS"
                             
                  elif self.active_submenu == "SHAPES_SETTINGS":
-                      # 1. Check IMPORT Button
-                      if sub_x <= x <= sub_x + 150 and current_y <= y <= current_y + 30:
-                          return "IMPORT_NEW"
-                      current_y += 40
-                      
-                      # 2. Check Shape Grid
+                      # 1. Check Shape Grid
                       cols = 3
                       size = 60
                       gap = 10
@@ -507,6 +538,9 @@ class UIOverlay:
                         self.active_submenu = None # Toggle Off
                     else:
                         self.active_submenu = target_sub # Switch
+                        # Auto-select the parent tool
+                        parent_tool = target_sub.replace("_SETTINGS", "")
+                        self.active_tool = parent_tool
                     return "SUBMENU_TOGGLED"
                 
                 elif btn["type"] == "ACTION":

@@ -20,6 +20,7 @@ class Canvas3D:
         # Current Settings
         self.current_color = (1.0, 1.0, 1.0) # Default White (R,G,B 0-1)
         self.current_thickness = 1
+        self.cursor_color = (1.0, 1.0, 1.0) # Default White (drawing mode will update this)
         
         # Tool State
         self.selected_indices = [] # Indices of selected strokes in self.lines
@@ -1003,6 +1004,40 @@ class Canvas3D:
                         glVertex3f(*v1)
                         glVertex3f(*v2)
         glEnd()
+        glEnd()
+        glPopMatrix()
+
+    def draw_cylinder_local(self, color, base_r, top_r):
+        glPushMatrix()
+        if len(color) == 4:
+            glColor4f(*color)
+        else:
+            glColor3f(*color)
+        
+        # Center the cylinder vertically
+        # Cylinder height is 1.0 (unit)
+        # gluCylinder draws from Z=0 to Z=height.
+        # We want it from Y=-0.5 to Y=0.5
+        # So rotate -90 X to point Up, then translate -0.5 in Z (which is Y now)
+        
+        glRotatef(-90, 1, 0, 0)
+        glTranslatef(0, 0, -0.5)
+        
+        gluCylinder(self.quadric, base_r, top_r, 1.0, 32, 1)
+        
+        # Caps
+        if base_r > 0:
+            glPushMatrix()
+            glRotatef(180, 1, 0, 0)
+            gluDisk(self.quadric, 0, base_r, 32, 1)
+            glPopMatrix()
+            
+        if top_r > 0:
+            glPushMatrix()
+            glTranslatef(0, 0, 1.0)
+            gluDisk(self.quadric, 0, top_r, 32, 1)
+            glPopMatrix()
+            
         glPopMatrix()
 
 
@@ -1037,6 +1072,10 @@ class Canvas3D:
                  self.draw_solid_cube_local(rgba)
              elif type == "PYRAMID":
                  self.draw_solid_pyramid_local(rgba)
+             elif type == "CYLINDER":
+                 self.draw_cylinder_local(rgba, 0.5, 0.5)
+             elif type == "CONE":
+                 self.draw_cylinder_local(rgba, 0.5, 0.0)
              elif type == "SPHERE":
                   glColor4f(*rgba)
                   gluSphere(self.quadric, 0.5, segments, segments)
@@ -1069,6 +1108,10 @@ class Canvas3D:
                  self.draw_solid_cube_local(draw_color)
             elif type == "PYRAMID":
                  self.draw_solid_pyramid_local(draw_color)
+            elif type == "CYLINDER":
+                 self.draw_cylinder_local(draw_color, 0.5, 0.5)
+            elif type == "CONE":
+                 self.draw_cylinder_local(draw_color, 0.5, 0.0)
             elif type == "SPHERE":
                  if len(draw_color) == 4: glColor4f(*draw_color)
                  else: glColor3f(*draw_color)
@@ -1080,6 +1123,8 @@ class Canvas3D:
                 if is_selected:
                     glDepthMask(GL_TRUE)
                 glDisable(GL_BLEND)
+
+            if is_selected:
                 
                 # 2. Draw Moving Dotted Outline
                 glEnable(GL_LINE_STIPPLE)
@@ -1099,6 +1144,9 @@ class Canvas3D:
                     self.draw_wireframe_cube_local((1,1,1))
                 elif type == "PYRAMID":
                     self.draw_wireframe_pyramid_local((1,1,1))
+                elif type == "CYLINDER" or type == "CONE":
+                     # Just box or simple lines?
+                     self.draw_wireframe_cube_local((1,1,1))
                 elif type == "SPHERE":
                     # Sphere wireframe is tricky with glut/glu, just draw a box or rings?
                     # Let's draw the bounding box for selection mostly
@@ -1184,6 +1232,8 @@ class Canvas3D:
             
             if needs_blend:
                  glDisable(GL_BLEND)
+
+            if is_selected:
                  
                  # Draw View-Dependent Silhouette Lines
                  glDisable(GL_DEPTH_TEST) # Ensure visibility
@@ -1284,7 +1334,12 @@ class Canvas3D:
             glPushMatrix()
             glTranslatef(*self.cursor_pos)
             glDisable(GL_LIGHTING)
-            glColor3f(1.0, 0.0, 1.0)
+            # glColor3f(1.0, 0.0, 1.0)
+            if len(self.cursor_color) >= 3:
+                # Use raw color
+                glColor3f(self.cursor_color[0], self.cursor_color[1], self.cursor_color[2])
+            else:
+                glColor3f(1.0, 1.0, 1.0)
             gluSphere(self.quadric, 0.15, 10, 10)
             glEnable(GL_LIGHTING)
             glPopMatrix()
